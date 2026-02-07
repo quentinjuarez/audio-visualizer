@@ -1,15 +1,16 @@
 {
-  "name": "retro-audio-viz",
-  "private": true,
+  "name": "audio-visualizer",
+  "version": "1.0.0",
+  "author": "quentinjuarez",
   "workspaces": [
     "server",
     "listener",
     "visualizer"
   ],
   "scripts": {
-    "start:server": "npm run start --workspace=server",
-    "start:listener": "npm run start --workspace=listener",
-    "start:viz": "npm run dev --workspace=visualizer"
+    "start:server": "yarn workspace server start",
+    "start:listener": "yarn workspace listener start",
+    "dev:visualizer": "yarn workspace visualizer dev"
   },
   "packageManager": "yarn@3.5.0"
 }
