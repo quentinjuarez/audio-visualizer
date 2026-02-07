@@ -32,7 +32,7 @@ export class AudioEngine {
 
   connectWebSocket() {
     console.log('AudioEngine: Connecting to WS...');
-    this.ws = new WebSocket('ws://localhost:3000');
+    this.ws = new WebSocket(import.meta.env.VITE_AUDIO_WS_URL);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onopen = () => {
