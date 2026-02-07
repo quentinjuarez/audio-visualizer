@@ -5,55 +5,74 @@ export class AudioEngine {
     this.ws = null;
     this.isReady = false;
 
-    // Buffers pour stocker les données analysées
+    // Buffers de données
     this.dataArrayTime = null;
     this.dataArrayFreq = null;
   }
 
-  async init() {
-    // 1. Création du contexte audio (nécessite un clic utilisateur généralement)
-    this.audioContext = new (
-      window.AudioContext || window.webkitAudioContext
-    )();
+  init() {
+    // 1. Création immédiate du contexte
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    this.audioContext = new AudioContext();
 
-    // 2. Création de l'analyseur (C'est lui qui fait les maths FFT)
+    // 2. Setup Analyseur
     this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 2048; // Résolution (plus haut = plus précis mais plus lent)
-    this.analyser.smoothingTimeConstant = 0.8; // Lissage pour que ça soit moins nerveux
+    this.analyser.fftSize = 2048;
+    this.analyser.smoothingTimeConstant = 0.8;
 
-    // Préparation des tableaux de données
     const bufferLength = this.analyser.frequencyBinCount;
     this.dataArrayTime = new Uint8Array(bufferLength);
     this.dataArrayFreq = new Uint8Array(bufferLength);
 
     this.isReady = true;
-    console.log('Audio Engine: Ready');
 
-    // 3. Connexion WS
+    // 3. Lancer la connexion WS (avec retry auto)
     this.connectWebSocket();
   }
 
   connectWebSocket() {
+    console.log('AudioEngine: Connecting to WS...');
     this.ws = new WebSocket('ws://localhost:3000');
     this.ws.binaryType = 'arraybuffer';
+
+    this.ws.onopen = () => {
+      console.log('AudioEngine: WS Connected ✅');
+    };
 
     this.ws.onmessage = (event) => {
       if (!this.isReady) return;
       this.processAudioChunk(event.data);
     };
+
+    this.ws.onclose = () => {
+      console.warn('AudioEngine: WS Disconnected ❌. Retrying in 3s...');
+      setTimeout(() => this.connectWebSocket(), 3000); // Retry infini
+    };
+
+    this.ws.onerror = (err) => {
+      console.error('AudioEngine: WS Error', err);
+      this.ws.close(); // Force le close pour déclencher le retry
+    };
+  }
+
+  // Appelée quand l'utilisateur clique (si le navigateur a bloqué le son)
+  async resumeContext() {
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+      console.log('AudioContext: Resumed 🔊');
+    }
   }
 
   processAudioChunk(rawBuffer) {
-    // Convertir les données brutes (PCM 16bit) en AudioBuffer jouable
+    if (this.audioContext.state === 'suspended') return; // On ne traite pas si c'est en pause
+
     const int16View = new Int16Array(rawBuffer);
     const float32View = new Float32Array(int16View.length);
 
-    // Normalisation (-1.0 à 1.0) pour l'AudioContext
     for (let i = 0; i < int16View.length; i++) {
       float32View[i] = int16View[i] / 32768.0;
     }
 
-    // Créer une source audio éphémère
     const audioBuffer = this.audioContext.createBuffer(
       1,
       float32View.length,
@@ -63,15 +82,10 @@ export class AudioEngine {
 
     const source = this.audioContext.createBufferSource();
     source.buffer = audioBuffer;
-
-    // Connecter la source à l'analyseur (mais PAS aux haut-parleurs pour éviter le larsen)
     source.connect(this.analyser);
-
-    // Jouer immédiatement (pour que l'analyseur reçoive les données)
     source.start();
   }
 
-  // Méthodes pour récupérer les données actuelles
   getTimeDomainData() {
     if (!this.isReady) return new Uint8Array(0);
     this.analyser.getByteTimeDomainData(this.dataArrayTime);
@@ -82,11 +96,5 @@ export class AudioEngine {
     if (!this.isReady) return new Uint8Array(0);
     this.analyser.getByteFrequencyData(this.dataArrayFreq);
     return this.dataArrayFreq;
-  }
-
-  resume() {
-    if (this.audioContext && this.audioContext.state === 'suspended') {
-      this.audioContext.resume();
-    }
   }
 }

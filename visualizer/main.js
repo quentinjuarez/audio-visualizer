@@ -3,49 +3,62 @@ import { Renderer } from './renderer.js';
 
 // DOM Elements
 const canvas = document.getElementById('canvas');
-const startBtn = document.getElementById('start-btn');
-const switchBtn = document.getElementById('switch-mode');
+const overlay = document.getElementById('start-overlay'); // Nouveau
+const btnMode = document.getElementById('btn-mode');
 
 // Instances
 const audioEngine = new AudioEngine();
 const renderer = new Renderer(canvas);
 
-let currentMode = 'TIME'; // ou 'FREQ'
-let animationId;
+let currentMode = 'TIME';
 
-// 1. Initialisation (Clic requis par les navigateurs pour l'AudioContext)
-startBtn.addEventListener('click', async () => {
-  await audioEngine.init();
-  startBtn.style.display = 'none'; // Cacher le bouton start
-  switchBtn.style.display = 'inline-block';
+// --- INITIALISATION ---
+// On tente de démarrer tout de suite
+audioEngine.init();
+renderer.resize();
 
-  // Lancer la boucle de rendu
-  renderLoop();
+// Boucle de rendu immédiate
+requestAnimationFrame(renderLoop);
+
+// Gestion du blocage navigateur (Autoplay Policy)
+checkAudioState();
+
+function checkAudioState() {
+  // Si le contexte est suspendu (bloqué), on affiche l'overlay
+  if (audioEngine.audioContext.state === 'suspended') {
+    overlay.style.display = 'flex';
+  } else {
+    overlay.style.display = 'none';
+  }
+}
+
+// Interaction utilisateur (pour débloquer l'audio)
+document.addEventListener('click', async () => {
+  await audioEngine.resumeContext();
+  checkAudioState(); // Cache l'overlay si c'est bon
 });
 
-// 2. Gestion du redimensionnement
+// --- LOGIQUE VISUELLE ---
+
+// Resize
 window.addEventListener('resize', () => renderer.resize());
-renderer.resize(); // Premier appel
 
-// 3. Changement de mode
-switchBtn.addEventListener('click', () => {
+// Changement de mode
+btnMode.addEventListener('click', (e) => {
+  e.stopPropagation(); // Évite de déclencher le click global inutilement
   currentMode = currentMode === 'TIME' ? 'FREQ' : 'TIME';
-  switchBtn.innerText = `MODE: ${currentMode}`;
+  btnMode.innerText = `MODE: ${currentMode}`;
 });
 
-// 4. Boucle d'animation (60fps)
+// Boucle d'animation
 function renderLoop() {
-  animationId = requestAnimationFrame(renderLoop);
+  requestAnimationFrame(renderLoop);
 
-  // Toujours nettoyer l'écran avant de dessiner
   renderer.clear();
 
-  // Récupérer et dessiner selon le mode
   if (currentMode === 'TIME') {
-    const timeData = audioEngine.getTimeDomainData();
-    renderer.drawWaveform(timeData);
+    renderer.drawWaveform(audioEngine.getTimeDomainData());
   } else {
-    const freqData = audioEngine.getFrequencyData();
-    renderer.drawFrequencies(freqData);
+    renderer.drawFrequencies(audioEngine.getFrequencyData());
   }
 }
