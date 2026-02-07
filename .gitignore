@@ -1,0 +1,12 @@
+node_modules/
+dist
+.env
+yarn-debug.log*
+yarn-error.log*
+coverage/
+.DS_Store
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions

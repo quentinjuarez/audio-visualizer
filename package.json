@@ -1,0 +1,15 @@
+{
+  "name": "retro-audio-viz",
+  "private": true,
+  "workspaces": [
+    "server",
+    "listener",
+    "visualizer"
+  ],
+  "scripts": {
+    "start:server": "npm run start --workspace=server",
+    "start:listener": "npm run start --workspace=listener",
+    "start:viz": "npm run dev --workspace=visualizer"
+  },
+  "packageManager": "yarn@3.5.0"
+}
