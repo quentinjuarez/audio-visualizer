@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 
 // --- CONFIGURATION ---
-const WS_URL = 'ws://localhost:3000';
+const WS_URL = 'wss://audio-visualizer-server.up.railway.app';
 const SAMPLE_RATE = 44100;
 const BUFFER_SIZE = 2048; // Taille du paquet (plus petit = plus fluide / plus grand = moins de charge)
 const INTERVAL_MS = (BUFFER_SIZE / SAMPLE_RATE) * 1000;
