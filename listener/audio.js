@@ -7,9 +7,9 @@ const Throttle = require('throttle');
 
 // --- CONFIGURATION ---
 const WS_URL = 'wss://audio-visualizer-server.up.railway.app';
-const MP3_FILE = path.join(__dirname, 'example.mp3'); // Met ton mp3 ici !
+const MP3_FILE = path.join(__dirname, 'example.mp3');
 const SAMPLE_RATE = 44100;
-const CHANNELS = 1; // Mono (plus simple pour la viz)
+const CHANNELS = 1;
 
 // 16-bit audio = 2 bytes par sample
 const BYTES_PER_SAMPLE = 2;
@@ -54,7 +54,7 @@ function playLoop() {
 
   // 2. On lance FFMPEG pour décoder le MP3 en RAW PCM
   const command = ffmpeg(MP3_FILE)
-    .format('s16le') // Format brut 16-bit Little Endian (celui attendu par le viz)
+    .format('s16le') // Format brut 16-bit Little Endian
     .audioCodec('pcm_s16le')
     .audioChannels(CHANNELS)
     .audioFrequency(SAMPLE_RATE)

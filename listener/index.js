@@ -24,7 +24,7 @@ ws.on('open', () => {
 
   const ai = new portAudio.AudioIO({
     inOptions: {
-      channelCount: 1, // Mono suffit pour la viz, 2 pour stereo
+      channelCount: 1,
       sampleFormat: portAudio.SampleFormat16Bit,
       sampleRate: 44100,
       deviceId: device.id,
