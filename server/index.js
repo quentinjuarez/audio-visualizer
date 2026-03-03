@@ -4,6 +4,12 @@ const http = require('http');
 const cors = require('cors');
 require('dotenv').config();
 
+if (process.env.APP_PAUSED === "true") {
+  console.log("🚫 Service paused.");
+  setInterval(() => {}, 1000 * 60 * 60);
+  return;
+}
+
 const app = express();
 app.use(cors());
 app.get('/', (req, res) => {
@@ -32,5 +38,5 @@ wss.on('connection', (ws) => {
 const port = process.env.PORT || 3000;
 
 server.listen(port, () => {
-  console.log(`Server started on http://localhost:${port}`);
+  console.log(`Running on http://localhost:${port}`);
 });

@@ -1,0 +1,13 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "sleep infinity"
+restartPolicyType = "NEVER"
+
+[deploy.resources]
+cpu = 0.1
+memory = 128
+
+[deploy.networking]
+servicePort = 8080
