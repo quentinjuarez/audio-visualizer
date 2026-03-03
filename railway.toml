@@ -4,9 +4,6 @@ numReplicas = 1
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 1
 
-[deploy.resources]
-cpu = 0.5
-memory = 512
-
-[deploy.networking]
-servicePort = 8080
+[deploy.limitOverride.containers]
+cpu = 0.1
+memoryBytes = 134217728   # 128 MB
