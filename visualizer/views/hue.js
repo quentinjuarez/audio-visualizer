@@ -36,8 +36,8 @@ export class HueView {
     this._groups = {};
     this._selectedLights = new Set(this._s.selectedLights ?? []);
     this._pending = null;
-    this._inflight = false;        // prevent request stacking
-    this._lastSentHue = -1;        // delta filter
+    this._inflight = false; // prevent request stacking
+    this._lastSentHue = -1; // delta filter
     this._lastSentBri = -1;
     this._beatActive = false;
     this._beatTimer = null;
@@ -64,18 +64,18 @@ export class HueView {
       bridgeIp: "",
       apiKey: "",
       selectedLights: [],
-      selectedGroup: "",           // "" = individual lights mode
-      colorSource: "energy_hue",   // "energy_hue" | "band_color" | "static"
+      selectedGroup: "", // "" = individual lights mode
+      colorSource: "energy_hue", // "energy_hue" | "band_color" | "static"
       staticHue: 0,
       staticSat: 200,
-      brightnessSource: "rms",     // "rms" | "beat_strength" | "static"
+      brightnessSource: "rms", // "rms" | "beat_strength" | "static"
       staticBri: 200,
       minBri: 30,
       maxBri: 254,
       beatFlash: true,
-      transitionTime: 1,           // deciseconds (0 = instant)
-      hueDeltaThreshold: 500,      // skip send if hue delta < this (0-65535)
-      briDeltaThreshold: 4,        // skip send if bri delta < this (0-254)
+      transitionTime: 1, // deciseconds (0 = instant)
+      hueDeltaThreshold: 500, // skip send if hue delta < this (0-65535)
+      briDeltaThreshold: 4, // skip send if bri delta < this (0-254)
     };
   }
 
@@ -137,11 +137,11 @@ export class HueView {
     });
 
     // Refresh lights & groups
-    $('hue-refresh-btn').addEventListener('click', () => this._fetchAll());
+    $("hue-refresh-btn").addEventListener("click", () => this._fetchAll());
 
     // Group selector
-    $('hue-group-select').value = this._s.selectedGroup;
-    $('hue-group-select').addEventListener('change', (e) => {
+    $("hue-group-select").value = this._s.selectedGroup;
+    $("hue-group-select").addEventListener("change", (e) => {
       this._s.selectedGroup = e.target.value;
       this._save();
       this._rescheduleFlush();
@@ -323,7 +323,7 @@ export class HueView {
   async _fetchAll() {
     const { bridgeIp: ip, apiKey: key } = this._s;
     if (!ip || !key) return;
-    this._setBridgeStatus('Loading…');
+    this._setBridgeStatus("Loading…");
     try {
       const [lightsRes, groupsRes] = await Promise.all([
         fetch(`http://${ip}/api/${key}/lights`),
@@ -333,7 +333,7 @@ export class HueView {
       const groupsData = await groupsRes.json();
 
       if (Array.isArray(lightsData) && lightsData[0]?.error) {
-        this._setBridgeStatus('Unauthorized — re-pair or check API key');
+        this._setBridgeStatus("Unauthorized — re-pair or check API key");
         return;
       }
       this._lights = lightsData;
@@ -349,11 +349,11 @@ export class HueView {
     }
   }
   _renderGroupSelector() {
-    const sel = $('hue-group-select');
+    const sel = $("hue-group-select");
     if (!sel) return;
     sel.innerHTML = '<option value="">— Individual lights —</option>';
     for (const [id, group] of Object.entries(this._groups)) {
-      const opt = document.createElement('option');
+      const opt = document.createElement("option");
       opt.value = id;
       opt.textContent = `${group.name} (${group.lights?.length ?? 0} lights)`;
       if (id === this._s.selectedGroup) opt.selected = true;
@@ -364,21 +364,22 @@ export class HueView {
 
   _updateGroupModeUI() {
     const groupMode = !!this._s.selectedGroup;
-    const lightsSection = $('hue-lights-individual');
-    if (lightsSection) lightsSection.style.display = groupMode ? 'none' : 'flex';
-    const reqRateEl = $('hue-req-rate');
+    const lightsSection = $("hue-lights-individual");
+    if (lightsSection)
+      lightsSection.style.display = groupMode ? "none" : "flex";
+    const reqRateEl = $("hue-req-rate");
     if (reqRateEl) {
       if (groupMode) {
-        reqRateEl.textContent = '1 req/flush (group mode ✓)';
-        reqRateEl.style.color = 'var(--accent)';
+        reqRateEl.textContent = "1 req/flush (group mode ✓)";
+        reqRateEl.style.color = "var(--accent)";
       } else {
         const n = this._selectedLights.size;
         const rate = this._flushMs();
         reqRateEl.textContent =
           n === 0
-            ? '0 req/flush'
-            : `${n} req / ${rate} ms ${n >= 3 ? '⚠ may saturate bridge' : ''}`;
-        reqRateEl.style.color = n >= 3 ? 'var(--beat)' : 'var(--muted)';
+            ? "0 req/flush"
+            : `${n} req / ${rate} ms ${n >= 3 ? "⚠ may saturate bridge" : ""}`;
+        reqRateEl.style.color = n >= 3 ? "var(--beat)" : "var(--muted)";
       }
     }
   }
@@ -392,7 +393,6 @@ export class HueView {
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = this._selectedLights.has(id);
-
 
       const dot = document.createElement("span");
       dot.className = "hue-light-dot";
@@ -408,7 +408,7 @@ export class HueView {
       type.className = "hue-light-type";
       type.textContent = light.type ?? "";
 
-      cb.addEventListener('change', () => {
+      cb.addEventListener("change", () => {
         if (cb.checked) this._selectedLights.add(id);
         else this._selectedLights.delete(id);
         this._save();
@@ -531,16 +531,15 @@ export class HueView {
 
     // ── Group mode: 1 request for all lights ──────────────────────────────
     if (this._s.selectedGroup) {
-      fetch(
-        `http://${ip}/api/${key}/groups/${this._s.selectedGroup}/action`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(state),
-        },
-      )
+      fetch(`http://${ip}/api/${key}/groups/${this._s.selectedGroup}/action`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(state),
+      })
         .catch(() => {})
-        .finally(() => { this._inflight = false; });
+        .finally(() => {
+          this._inflight = false;
+        });
       return;
     }
 
@@ -552,8 +551,8 @@ export class HueView {
         return;
       }
       fetch(`http://${ip}/api/${key}/lights/${ids[i]}/state`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(state),
       })
         .catch(() => {})
