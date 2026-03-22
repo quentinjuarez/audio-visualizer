@@ -3,74 +3,348 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Audio Visualizer</title>
+    <title>Audio Debug</title>
     <style>
-      body {
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
         margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --bg: #0d0d0d;
+        --panel: #111;
+        --border: #1e1e1e;
+        --fg: #e0e0e0;
+        --muted: #444;
+        --accent: #22cc66;
+        --beat: #ff4444;
+      }
+
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: "Courier New", monospace;
+        font-size: 12px;
         overflow: hidden;
-        background: #000;
-        font-family: monospace;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── Status bar ────────────────────────────────── */
+      #status {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        height: 38px;
+        padding: 0 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .s-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .s-item label {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+      .s-item span {
+        font-size: 12px;
+        font-weight: bold;
+        min-width: 70px;
+      }
+
+      #ws-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #333;
+        flex-shrink: 0;
+      }
+      #ws-dot.on {
+        background: var(--accent);
+      }
+      #ws-label {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      #beat-flash {
+        padding: 2px 10px;
+        border-radius: 3px;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        color: #444;
+        font-size: 11px;
+        font-weight: bold;
+        letter-spacing: 1px;
+        transition:
+          background 0.05s,
+          color 0.05s,
+          border-color 0.05s;
+      }
+      #beat-flash.active {
+        background: var(--beat);
+        border-color: var(--beat);
+        color: #fff;
+      }
+
+      #hue-swatch {
+        width: 22px;
+        height: 16px;
+        border-radius: 3px;
+        border: 1px solid #333;
+        flex-shrink: 0;
+      }
+
+      /* ── Main grid ─────────────────────────────────── */
+      #main {
+        flex: 1;
+        display: grid;
+        grid-template-rows: 1fr 1.8fr 1fr;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      .panel {
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .panel-title {
+        flex-shrink: 0;
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        padding: 4px 12px 2px;
+        letter-spacing: 0.5px;
       }
       canvas {
         display: block;
-      }
-
-      /* UI Controls */
-      #ui {
-        position: absolute;
-        top: 20px;
-        left: 20px;
-        z-index: 10;
-      }
-      button {
-        background: transparent;
-        border: 1px solid #fff;
-        color: #fff;
-        padding: 5px 10px;
-        cursor: pointer;
-        font-family: inherit;
-      }
-      button:hover {
-        background: #fff;
-        color: #000;
-      }
-
-      /* Overlay bloquant pour le premier clic */
-      #start-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
+        flex: 1;
+        min-height: 0;
         width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.8);
-        display: none; /* Caché par défaut, activé par JS si besoin */
-        justify-content: center;
-        align-items: center;
-        z-index: 100;
-        cursor: pointer;
-        color: white;
+      }
+
+      /* ── Bottom row ────────────────────────────────── */
+      #bottom-row {
+        display: grid;
+        grid-template-columns: 1fr 280px;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      /* Bands */
+      #bands-panel {
+        border-right: 1px solid var(--border);
+        padding: 6px 12px 4px;
+        display: flex;
         flex-direction: column;
+        overflow: hidden;
       }
-      .blink {
-        animation: blink 1s infinite;
+      #bands-grid {
+        display: flex;
+        gap: 6px;
+        flex: 1;
+        align-items: flex-end;
+        padding-bottom: 16px;
       }
-      @keyframes blink {
-        50% {
-          opacity: 0;
-        }
+      .band-col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        flex: 1;
+        gap: 3px;
+        height: 100%;
+      }
+      .band-value {
+        font-size: 9px;
+        color: var(--muted);
+      }
+      .band-bar-wrap {
+        flex: 1;
+        width: 100%;
+        background: #1a1a1a;
+        border-radius: 2px;
+        overflow: hidden;
+        display: flex;
+        align-items: flex-end;
+      }
+      .band-bar {
+        width: 100%;
+        border-radius: 2px;
+        transition: height 0.05s linear;
+      }
+      .band-name {
+        font-size: 8px;
+        color: #333;
+        text-transform: uppercase;
+      }
+
+      /* Descriptors */
+      #desc-panel {
+        padding: 8px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        justify-content: center;
+      }
+      .desc-title {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+      .desc-row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .desc-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .desc-label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      .desc-value {
+        font-size: 11px;
+        color: var(--fg);
+      }
+      .desc-bar-wrap {
+        height: 6px;
+        background: #1a1a1a;
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .desc-bar {
+        height: 100%;
+        border-radius: 2px;
+        transition: width 0.05s linear;
+        width: 0%;
       }
     </style>
   </head>
   <body>
-    <div id="start-overlay">
-      <h1 class="blink">CLICK ANYWHERE TO INITIALIZE SYSTEM</h1>
+    <!-- Status bar -->
+    <div id="status">
+      <div class="s-item">
+        <div id="ws-dot"></div>
+        <span id="ws-label">Disconnected</span>
+      </div>
+      <div class="s-item"><label>RMS</label><span id="val-rms">—</span></div>
+      <div class="s-item"><label>dB</label><span id="val-db">—</span></div>
+      <div class="s-item"><label>Peak</label><span id="val-peak">—</span></div>
+      <div class="s-item">
+        <label>Dominant</label><span id="val-dominant">—</span>
+      </div>
+      <div class="s-item">
+        <div id="beat-flash">BEAT</div>
+      </div>
+      <div class="s-item">
+        <label>Hue</label>
+        <span id="val-hue">—</span>
+        <div id="hue-swatch"></div>
+      </div>
     </div>
 
-    <div id="ui">
-      <button id="btn-mode">MODE: TIME</button>
-    </div>
+    <!-- Main -->
+    <div id="main">
+      <!-- Waveform -->
+      <div class="panel">
+        <div class="panel-title">Waveform — 256 pts</div>
+        <canvas id="waveform-canvas"></canvas>
+      </div>
 
-    <canvas id="canvas"></canvas>
+      <!-- FFT -->
+      <div class="panel">
+        <div class="panel-title">FFT Spectrum — 64 log bins</div>
+        <canvas id="fft-canvas"></canvas>
+      </div>
+
+      <!-- Bottom row -->
+      <div id="bottom-row">
+        <!-- Band meters -->
+        <div id="bands-panel">
+          <div class="panel-title">Frequency Bands</div>
+          <div id="bands-grid"><!-- filled by JS --></div>
+        </div>
+
+        <!-- Spectral descriptors -->
+        <div id="desc-panel">
+          <div class="desc-title">Spectral Descriptors</div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Centroid</span>
+              <span class="desc-value" id="val-centroid">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-centroid"
+                class="desc-bar"
+                style="background: #22aaff"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Rolloff</span>
+              <span class="desc-value" id="val-rolloff">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-rolloff"
+                class="desc-bar"
+                style="background: #cc8844"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Flux</span>
+              <span class="desc-value" id="val-flux">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-flux"
+                class="desc-bar"
+                style="background: #cc44cc"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Beat Strength</span>
+              <span class="desc-value" id="val-beat-strength">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-beat-strength"
+                class="desc-bar"
+                style="background: #ff4444"
+              ></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/main.js"></script>
   </body>

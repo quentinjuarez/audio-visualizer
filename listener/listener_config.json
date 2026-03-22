@@ -1,9 +1,9 @@
 {
-  "ws_url": "wss://audio-visualizer-server.up.railway.app",
+  "ws_url": "ws://localhost:3000",
   "device_name": "\ud83d\udd0a Loopback: Focusrite USB (Focusrite USB Audio) [Loopback]",
-  "gate_db": -52.0,
+  "gate_db": -60.0,
   "url_history": [
-    "wss://audio-visualizer-server.up.railway.app",
-    "ws://localhost:3000"
+    "ws://localhost:3000",
+    "wss://audio-visualizer-server.up.railway.app"
   ]
 }

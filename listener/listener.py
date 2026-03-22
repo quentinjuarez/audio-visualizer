@@ -1,12 +1,29 @@
 #!/usr/bin/env python3
 """
 Audio Listener
-Captures any audio device and streams raw 16-bit mono PCM over WebSocket.
+Captures any audio device, analyses each block (FFT, bands, beat, spectral
+descriptors) and broadcasts a compact JSON frame over WebSocket at ~22 fps.
 
 WASAPI loopback devices (prefixed with "🔊 Loopback:") capture everything
 playing through that output — no virtual cable or VoiceMeeter needed.
 
 Other devices (microphones, virtual cable outputs, etc.) are listed as-is.
+
+JSON frame schema
+-----------------
+{
+  rms, db, peak,
+  bands: { sub, bass, low_mid, mid, high_mid, high, air },  // 0-1
+  fft: float[64],        // log-spaced magnitude bins, 0-1
+  waveform: float[256],  // downsampled time-domain, 0-1
+  beat: bool,
+  beat_strength: float,  // 0-1
+  centroid: float,       // spectral centroid, 0-1
+  flux: float,           // half-wave spectral flux
+  rolloff: float,        // 85% rolloff freq, 0-1
+  dominant_band: str,
+  energy_zone_hue: int   // 0-360, for direct Hue lamp mapping
+}
 """
 
 import json
@@ -33,6 +50,22 @@ DEFAULT_WS_URL = "ws://localhost:3000"
 SAMPLE_RATE = 44100
 BLOCK_SIZE = 2048  # ~46 ms per chunk
 
+FFT_BINS = 64          # log-spaced bins sent to clients
+WAVEFORM_POINTS = 256  # time-domain points sent to clients
+FLUX_HISTORY_SIZE = 20 # frames kept for adaptive beat threshold
+BEAT_MULTIPLIER = 1.5  # flux must exceed mean*this to register a beat
+
+# Frequency band definitions (Hz)
+_BAND_RANGES = [
+    ("sub",      20,    60),
+    ("bass",     60,   250),
+    ("low_mid",  250,  500),
+    ("mid",      500,  2000),
+    ("high_mid", 2000, 4000),
+    ("high",     4000, 8000),
+    ("air",      8000, 20000),
+]
+
 
 # ---------------------------------------------------------------------------
 # App
@@ -50,12 +83,25 @@ class AudioListenerApp:
         self._pa: pyaudio.PyAudio | None = None
         self._capture_channels = 1
         self.is_running = False
-        self.pcm_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
+        self.frame_queue: queue.Queue[str] = queue.Queue(maxsize=100)
+        self._prev_fft: np.ndarray | None = None
+        self._flux_history: list[float] = []
         self._vu_raw = 0.0      # last RMS measured in audio thread
         self._vu_smooth = 0.0   # smoothed value for rendering
         self.device_map: dict[str, int] = {}  # display_name → device index
         self.loopback_set: set[str] = set()  # loopback device labels
         self._gate_threshold = 0.01  # RMS linear; updated by UI slider
+
+        # Precompute FFT helpers (block size is fixed at startup)
+        self._fft_window: np.ndarray = np.hanning(BLOCK_SIZE)
+        self._fft_freqs: np.ndarray = np.fft.rfftfreq(BLOCK_SIZE, d=1.0 / SAMPLE_RATE)
+        self._log_edges: np.ndarray = np.logspace(
+            np.log10(20.0), np.log10(20000.0), FFT_BINS + 1
+        )
+        self._band_masks: list[tuple[str, np.ndarray]] = [
+            (name, (self._fft_freqs >= lo) & (self._fft_freqs < hi))
+            for name, lo, hi in _BAND_RANGES
+        ]
 
         self._setup_ui()
         self._refresh_devices()
@@ -121,20 +167,108 @@ class AudioListenerApp:
         elif names:
             self.device_var.set(names[0])
 
+    # ── Analysis (called from real-time thread) ─────────────────────────────
+
+    def _analyze_frame(self, mono: np.ndarray) -> str:
+        """Full spectral analysis of one Int16 mono block. Returns JSON string."""
+        f = mono.astype(np.float32) / 32768.0  # → [-1, 1]
+
+        # Time domain
+        rms  = float(np.sqrt(np.mean(f ** 2)))
+        db   = round(20.0 * np.log10(max(rms, 1e-9)), 2)
+        peak = float(np.max(np.abs(f)))
+
+        # Waveform: WAVEFORM_POINTS equidistant samples, mapped to [0, 1]
+        step = max(1, len(f) // WAVEFORM_POINTS)
+        waveform = np.clip((f[::step][:WAVEFORM_POINTS] + 1.0) / 2.0, 0.0, 1.0)
+
+        # FFT magnitude (peak-normalised)
+        magnitude = np.abs(np.fft.rfft(f * self._fft_window)) / (BLOCK_SIZE / 2)
+        BOOST = 20.0  # empirical scale for typical music levels
+
+        # Band energies
+        bands: dict[str, float] = {}
+        for name, mask in self._band_masks:
+            bands[name] = (
+                round(float(np.clip(np.mean(magnitude[mask]) * BOOST, 0.0, 1.0)), 4)
+                if mask.any() else 0.0
+            )
+
+        # 64 log-spaced visualiser bins
+        fft_bins: list[float] = []
+        for i in range(FFT_BINS):
+            lo, hi = self._log_edges[i], self._log_edges[i + 1]
+            mask = (self._fft_freqs >= lo) & (self._fft_freqs < hi)
+            if mask.any():
+                val = float(np.clip(np.mean(magnitude[mask]) * BOOST, 0.0, 1.0))
+            else:
+                # No FFT sample falls in this narrow log range (common in bass);
+                # fall back to the single nearest frequency bin.
+                nearest = int(np.argmin(np.abs(self._fft_freqs - (lo + hi) / 2.0)))
+                val = float(np.clip(magnitude[nearest] * BOOST, 0.0, 1.0))
+            fft_bins.append(round(val, 3))
+
+        # Spectral centroid (0-1)
+        total = float(np.sum(magnitude))
+        nyquist = SAMPLE_RATE / 2.0
+        centroid = (
+            float(np.sum(self._fft_freqs * magnitude) / total) / nyquist
+            if total > 0 else 0.0
+        )
+
+        # Spectral rolloff — freq below which 85% of energy sits (0-1)
+        cumsum = np.cumsum(magnitude)
+        rolloff_idx = int(np.searchsorted(cumsum, 0.85 * cumsum[-1]))
+        rolloff = float(self._fft_freqs[min(rolloff_idx, len(self._fft_freqs) - 1)]) / nyquist
+
+        # Spectral flux (half-wave rectified diff vs previous frame)
+        if self._prev_fft is None:
+            flux = 0.0
+        else:
+            flux = float(np.sum(np.maximum(magnitude - self._prev_fft, 0.0)))
+        self._prev_fft = magnitude.copy()
+
+        # Adaptive beat detection
+        self._flux_history.append(flux)
+        if len(self._flux_history) > FLUX_HISTORY_SIZE:
+            self._flux_history.pop(0)
+        avg_flux = float(np.mean(self._flux_history)) if self._flux_history else 0.0
+        beat = bool(flux > avg_flux * BEAT_MULTIPLIER and flux > 0.005)
+        beat_strength = round(min(1.0, flux / max(avg_flux * 3.0, 1e-6)), 4)
+
+        dominant_band = max(bands, key=lambda k: bands[k])
+        energy_zone_hue = int(centroid * 360)
+
+        return json.dumps({
+            "rms":             round(rms, 4),
+            "db":              db,
+            "peak":            round(peak, 4),
+            "bands":           bands,
+            "fft":             fft_bins,
+            "waveform":        [round(float(v), 3) for v in waveform],
+            "beat":            beat,
+            "beat_strength":   beat_strength,
+            "centroid":        round(centroid, 4),
+            "flux":            round(flux, 4),
+            "rolloff":         round(rolloff, 4),
+            "dominant_band":   dominant_band,
+            "energy_zone_hue": energy_zone_hue,
+        }, separators=(",", ":"))
+
     # ── Audio callback (real-time thread) ────────────────────────────────────
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         if not self.is_running:
             return (None, pyaudio.paContinue)
-        # in_data is raw Int16LE bytes; reshape to (frames, channels) then mix to mono
+        # Reshape to (frames, channels) then mix to mono
         samples = np.frombuffer(in_data, dtype=np.int16).reshape(-1, self._capture_channels)
         mono = samples.mean(axis=1).astype(np.int16)
         rms = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2)))
         self._vu_raw = rms
-        # Noise gate: drop silent frames so the server receives nothing when idle
+        # Noise gate: drop silent frames
         if rms >= self._gate_threshold:
             try:
-                self.pcm_queue.put_nowait(mono.tobytes())
+                self.frame_queue.put_nowait(self._analyze_frame(mono))
             except queue.Full:
                 pass  # drop frame — never block the real-time thread
         return (None, pyaudio.paContinue)
@@ -144,9 +278,9 @@ class AudioListenerApp:
     def _send_loop(self):
         while self.is_running:
             try:
-                data = self.pcm_queue.get(timeout=0.5)
+                payload = self.frame_queue.get(timeout=0.5)
                 if self.ws and self.ws.connected:
-                    self.ws.send_binary(data)
+                    self.ws.send(payload)  # JSON text frame
             except queue.Empty:
                 continue
             except Exception as exc:
@@ -251,6 +385,8 @@ class AudioListenerApp:
                 pass
             self.ws = None
         self._vu_raw = 0.0
+        self._prev_fft = None
+        self._flux_history = []
         self._set_status("⏹  Stopped", "#888888")
         self.toggle_btn.config(text="▶  Start", state="normal")
 
@@ -370,7 +506,7 @@ class AudioListenerApp:
         ).pack(pady=(18, 2))
         tk.Label(
             self.root,
-            text="Captures audio and streams raw PCM over WebSocket",
+            text="Captures audio · analyses FFT · streams JSON over WebSocket",
             font=("Segoe UI", 9),
             bg=BG,
             fg=MUTED,
