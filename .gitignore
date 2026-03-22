@@ -1,5 +1,5 @@
 node_modules/
-dist
+visualizer/dist
 .env
 yarn-debug.log*
 yarn-error.log*

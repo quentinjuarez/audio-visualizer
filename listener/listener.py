@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import numpy as np
-import sounddevice as sd
+import pyaudiowpatch as pyaudio
 import websocket
 
 # ---------------------------------------------------------------------------
@@ -46,13 +46,15 @@ class AudioListenerApp:
 
         self.config = self._load_config()
         self.ws: websocket.WebSocket | None = None
-        self.stream: sd.InputStream | None = None
+        self.stream = None
+        self._pa: pyaudio.PyAudio | None = None
+        self._capture_channels = 1
         self.is_running = False
         self.pcm_queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
         self._vu_raw = 0.0      # last RMS measured in audio thread
         self._vu_smooth = 0.0   # smoothed value for rendering
         self.device_map: dict[str, int] = {}  # display_name → device index
-        self.loopback_set: set[str] = set()  # display names that need WasapiSettings(loopback=True)
+        self.loopback_set: set[str] = set()  # loopback device labels
 
         self._setup_ui()
         self._refresh_devices()
@@ -83,35 +85,29 @@ class AudioListenerApp:
     # ── Devices ──────────────────────────────────────────────────────────────
 
     def _refresh_devices(self):
-        devices = sd.query_devices()
-        host_apis = sd.query_hostapis()
-
+        # pyaudiowpatch exposes WASAPI loopback devices as real input devices
+        # with isLoopbackDevice=True — no virtual cable needed.
+        pa = pyaudio.PyAudio()
         self.device_map = {}
         self.loopback_set = set()
 
-        # Find the WASAPI host API index
-        wasapi_idx = next(
-            (i for i, h in enumerate(host_apis) if "WASAPI" in h["name"]),
-            None,
-        )
-
-        # 1. WASAPI output devices → exposed as loopback sources (no virtual cable needed)
-        #    PortAudio/sounddevice supports opening an output device as an input
-        #    with WasapiSettings(loopback=True), capturing everything playing on it.
-        if wasapi_idx is not None:
-            for i, d in enumerate(devices):
-                if d["hostapi"] == wasapi_idx and d["max_output_channels"] > 0:
-                    label = f"🔊 Loopback: {d['name']}"
-                    self.device_map[label] = i
-                    self.loopback_set.add(label)
+        # 1. WASAPI loopback devices first (prefixed so they sort to the top)
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if info.get("isLoopbackDevice") and info["maxInputChannels"] > 0:
+                label = f"🔊 Loopback: {info['name']}"
+                self.device_map[label] = i
+                self.loopback_set.add(label)
 
         # 2. Regular input devices (microphones, virtual cable outputs, etc.)
-        for i, d in enumerate(devices):
-            if d["max_input_channels"] > 0:
-                name = d["name"]
-                # Avoid duplicate if a device appears under multiple host APIs
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if not info.get("isLoopbackDevice") and info["maxInputChannels"] > 0:
+                name = info["name"]
                 if name not in self.device_map:
                     self.device_map[name] = i
+
+        pa.terminate()
 
         names = list(self.device_map)
         self.device_combo["values"] = names
@@ -124,16 +120,18 @@ class AudioListenerApp:
 
     # ── Audio callback (real-time thread) ────────────────────────────────────
 
-    def _audio_callback(self, indata, frames, time, status):  # noqa: ARG002
+    def _audio_callback(self, in_data, frame_count, time_info, status):
         if not self.is_running:
-            return
-        mono = indata[:, 0]
-        self._vu_raw = float(np.sqrt(np.mean(mono**2)))
-        pcm = (mono * 32767).astype(np.int16).tobytes()
+            return (None, pyaudio.paContinue)
+        # in_data is raw Int16LE bytes; reshape to (frames, channels) then mix to mono
+        samples = np.frombuffer(in_data, dtype=np.int16).reshape(-1, self._capture_channels)
+        mono = samples.mean(axis=1).astype(np.int16)
+        self._vu_raw = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2)))
         try:
-            self.pcm_queue.put_nowait(pcm)
+            self.pcm_queue.put_nowait(mono.tobytes())
         except queue.Full:
             pass  # drop frame — never block the real-time thread
+        return (None, pyaudio.paContinue)
 
     # ── WebSocket send loop (background thread) ───────────────────────────────
 
@@ -183,27 +181,25 @@ class AudioListenerApp:
 
             # 2. Open audio stream
             device_idx = self.device_map[device_name]
-            device_info = sd.query_devices(device_idx)
-            is_loopback = device_name in self.loopback_set
-            # For loopback we read from an output device, so use its output channel count.
-            # For regular inputs, use input channel count. Always downmix to mono.
-            ch = device_info["max_output_channels"] if is_loopback else device_info["max_input_channels"]
-            channels = min(2, max(1, ch))  # PortAudio needs ≥1 channel; cap at 2
-            extra = sd.WasapiSettings(loopback=True) if is_loopback else None
+            self._pa = pyaudio.PyAudio()
+            info = self._pa.get_device_info_by_index(device_idx)
+            self._capture_channels = min(2, max(1, int(info["maxInputChannels"])))
             try:
-                self.stream = sd.InputStream(
-                    device=device_idx,
-                    channels=channels,
-                    samplerate=SAMPLE_RATE,
-                    blocksize=BLOCK_SIZE,
-                    dtype="float32",
-                    extra_settings=extra,
-                    callback=self._audio_callback,
+                self.stream = self._pa.open(
+                    format=pyaudio.paInt16,
+                    channels=self._capture_channels,
+                    rate=SAMPLE_RATE,
+                    frames_per_buffer=BLOCK_SIZE,
+                    input=True,
+                    input_device_index=device_idx,
+                    stream_callback=self._audio_callback,
                 )
-                self.stream.start()
+                self.stream.start_stream()
             except Exception as exc:
                 self._set_status(f"❌ Audio: {exc}", "#ff5555")
                 ws.close()
+                self._pa.terminate()
+                self._pa = None
                 self.root.after(
                     0, lambda: self.toggle_btn.config(state="normal", text="▶  Start")
                 )
@@ -226,11 +222,17 @@ class AudioListenerApp:
         self.is_running = False
         if self.stream:
             try:
-                self.stream.stop()
+                self.stream.stop_stream()
                 self.stream.close()
             except Exception:
                 pass
             self.stream = None
+        if self._pa:
+            try:
+                self._pa.terminate()
+            except Exception:
+                pass
+            self._pa = None
         if self.ws:
             try:
                 self.ws.close()
