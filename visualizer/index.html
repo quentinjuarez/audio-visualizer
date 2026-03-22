@@ -580,6 +580,15 @@
         <label>Dominant</label><span id="val-dominant">—</span>
       </div>
       <div class="s-item">
+        <label>Tempo</label><span id="val-tempo">—</span>
+      </div>
+      <div class="s-item">
+        <label>Conf</label><span id="val-tempo-conf">—</span>
+      </div>
+      <div class="s-item">
+        <label>Beat Src</label><span id="val-beat-source">—</span>
+      </div>
+      <div class="s-item">
         <div id="beat-flash">BEAT</div>
       </div>
       <div class="s-item">
@@ -784,6 +793,14 @@
             <input type="checkbox" id="hue-beat-flash" />
             <label for="hue-beat-flash">Flash to max brightness on beat</label>
           </div>
+          <div class="hp-row">
+            <label>Beat source</label>
+            <select id="hue-beat-source">
+              <option value="auto">Auto (tempo + flux)</option>
+              <option value="tempo">Tempo only</option>
+              <option value="flux">Flux only</option>
+            </select>
+          </div>
           <div class="hp-slider-row">
             <label>Transition</label>
             <input type="range" id="hue-transition" min="0" max="5" step="1" />
@@ -843,6 +860,62 @@
                 id="bar-rolloff"
                 class="desc-bar"
                 style="background: #cc8844"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Bandwidth</span>
+              <span class="desc-value" id="val-bandwidth">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-bandwidth"
+                class="desc-bar"
+                style="background: #4488ff"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Flatness</span>
+              <span class="desc-value" id="val-flatness">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-flatness"
+                class="desc-bar"
+                style="background: #66cccc"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">ZCR</span>
+              <span class="desc-value" id="val-zcr">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-zcr"
+                class="desc-bar"
+                style="background: #ffaa55"
+              ></div>
+            </div>
+          </div>
+
+          <div class="desc-row">
+            <div class="desc-header">
+              <span class="desc-label">Tempo Conf</span>
+              <span class="desc-value" id="val-tempo-confidence">0.000</span>
+            </div>
+            <div class="desc-bar-wrap">
+              <div
+                id="bar-tempo-confidence"
+                class="desc-bar"
+                style="background: #22cc66"
               ></div>
             </div>
           </div>

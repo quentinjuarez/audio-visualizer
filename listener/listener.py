@@ -17,10 +17,18 @@ JSON frame schema
   fft: float[64],        // log-spaced magnitude bins, 0-1
   waveform: float[256],  // downsampled time-domain, 0-1
   beat: bool,
+    beat_flux: bool,
+    beat_tempo: bool,
+    beat_source: str,      // none | flux | tempo | both
   beat_strength: float,  // 0-1
+    tempo_bpm: float,      // estimated tempo, 0 when unknown
+    tempo_confidence: float, // 0-1 confidence of BPM lock
   centroid: float,       // spectral centroid, 0-1
   flux: float,           // half-wave spectral flux
   rolloff: float,        // 85% rolloff freq, 0-1
+    bandwidth: float,      // spectral spread, 0-1
+    flatness: float,       // spectral flatness, 0-1
+    zcr: float,            // zero crossing rate, 0-1
   dominant_band: str,
   energy_zone_hue: int   // 0-360, for direct Hue lamp mapping
 }
@@ -54,6 +62,8 @@ FFT_BINS = 64          # log-spaced bins sent to clients
 WAVEFORM_POINTS = 256  # time-domain points sent to clients
 FLUX_HISTORY_SIZE = 20 # frames kept for adaptive beat threshold
 BEAT_MULTIPLIER = 1.5  # flux must exceed mean*this to register a beat
+MIN_TEMPO_BPM = 70.0
+MAX_TEMPO_BPM = 180.0
 
 # Frequency band definitions (Hz)
 _BAND_RANGES = [
@@ -86,6 +96,13 @@ class AudioListenerApp:
         self.frame_queue: queue.Queue[str] = queue.Queue(maxsize=100)
         self._prev_fft: np.ndarray | None = None
         self._flux_history: list[float] = []
+        self._frame_idx = 0
+        self._onset_frames: list[int] = []
+        self._last_onset_frame = -10_000
+        self._tempo_bpm = 0.0
+        self._tempo_confidence = 0.0
+        self._tempo_period_frames = 0.0
+        self._next_tempo_beat_frame: float | None = None
         self._vu_raw = 0.0      # last RMS measured in audio thread
         self._vu_smooth = 0.0   # smoothed value for rendering
         self.device_map: dict[str, int] = {}  # display_name → device index
@@ -172,11 +189,14 @@ class AudioListenerApp:
     def _analyze_frame(self, mono: np.ndarray) -> str:
         """Full spectral analysis of one Int16 mono block. Returns JSON string."""
         f = mono.astype(np.float32) / 32768.0  # → [-1, 1]
+        self._frame_idx += 1
+        frame_rate = SAMPLE_RATE / BLOCK_SIZE
 
         # Time domain
         rms  = float(np.sqrt(np.mean(f ** 2)))
         db   = round(20.0 * np.log10(max(rms, 1e-9)), 2)
         peak = float(np.max(np.abs(f)))
+        zcr = float(np.mean(np.abs(np.diff(np.signbit(f)).astype(np.float32))))
 
         # Waveform: WAVEFORM_POINTS equidistant samples, mapped to [0, 1]
         step = max(1, len(f) // WAVEFORM_POINTS)
@@ -216,6 +236,27 @@ class AudioListenerApp:
             if total > 0 else 0.0
         )
 
+        # Spectral spread around centroid (0-1)
+        centroid_hz = centroid * nyquist
+        bandwidth = (
+            float(
+                np.sqrt(
+                    np.sum(((self._fft_freqs - centroid_hz) ** 2) * magnitude) / total
+                )
+            )
+            / nyquist
+            if total > 0
+            else 0.0
+        )
+
+        # Spectral flatness (0-1): noise-like spectra -> high values
+        eps = 1e-12
+        flatness = (
+            float(np.exp(np.mean(np.log(magnitude + eps))) / (np.mean(magnitude + eps)))
+            if np.any(magnitude > 0)
+            else 0.0
+        )
+
         # Spectral rolloff — freq below which 85% of energy sits (0-1)
         cumsum = np.cumsum(magnitude)
         rolloff_idx = int(np.searchsorted(cumsum, 0.85 * cumsum[-1]))
@@ -233,8 +274,65 @@ class AudioListenerApp:
         if len(self._flux_history) > FLUX_HISTORY_SIZE:
             self._flux_history.pop(0)
         avg_flux = float(np.mean(self._flux_history)) if self._flux_history else 0.0
-        beat = bool(flux > avg_flux * BEAT_MULTIPLIER and flux > 0.005)
-        beat_strength = round(min(1.0, flux / max(avg_flux * 3.0, 1e-6)), 4)
+        beat_flux = bool(flux > avg_flux * BEAT_MULTIPLIER and flux > 0.005)
+
+        # Onset list for tempo lock (ignore unrealistically close onsets)
+        min_interval_frames = max(1, int(frame_rate * (60.0 / MAX_TEMPO_BPM)))
+        max_interval_frames = max(min_interval_frames + 1, int(frame_rate * (60.0 / MIN_TEMPO_BPM)))
+        onset = False
+        if beat_flux and (self._frame_idx - self._last_onset_frame) >= min_interval_frames:
+            onset = True
+            self._last_onset_frame = self._frame_idx
+            self._onset_frames.append(self._frame_idx)
+            history_window = int(frame_rate * 12.0)  # keep ~12 seconds of onsets
+            cutoff = self._frame_idx - history_window
+            self._onset_frames = [t for t in self._onset_frames if t >= cutoff]
+
+        # Tempo estimate from onset intervals
+        tempo_bpm = self._tempo_bpm
+        tempo_confidence = self._tempo_confidence
+        if len(self._onset_frames) >= 5:
+            intervals = np.diff(np.array(self._onset_frames[-20:], dtype=np.int32))
+            valid_intervals = intervals[
+                (intervals >= min_interval_frames) & (intervals <= max_interval_frames)
+            ]
+            if len(valid_intervals) >= 4:
+                bpms = 60.0 * frame_rate / valid_intervals.astype(np.float32)
+                tempo_bpm = float(np.median(bpms))
+                bpm_std = float(np.std(bpms))
+                sample_factor = min(1.0, len(valid_intervals) / 12.0)
+                stability = 1.0 - min(1.0, bpm_std / 15.0)
+                tempo_confidence = max(0.0, min(1.0, sample_factor * stability))
+                self._tempo_bpm = tempo_bpm
+                self._tempo_confidence = tempo_confidence
+                self._tempo_period_frames = 60.0 * frame_rate / max(tempo_bpm, 1e-6)
+
+                # Re-align phase when a strong onset appears while locked.
+                if onset and tempo_confidence >= 0.35:
+                    self._next_tempo_beat_frame = self._frame_idx + self._tempo_period_frames
+
+        # Tempo-driven beat prediction for steadier beat marks between transients
+        beat_tempo = False
+        if tempo_confidence >= 0.35 and self._tempo_period_frames > 0.0:
+            if self._next_tempo_beat_frame is None:
+                self._next_tempo_beat_frame = self._frame_idx + self._tempo_period_frames
+            if self._frame_idx >= self._next_tempo_beat_frame - 0.5:
+                beat_tempo = True
+                while self._next_tempo_beat_frame <= self._frame_idx + 0.5:
+                    self._next_tempo_beat_frame += self._tempo_period_frames
+
+        beat = beat_flux or beat_tempo
+        flux_strength = min(1.0, flux / max(avg_flux * 3.0, 1e-6))
+        tempo_strength = tempo_confidence if beat_tempo else 0.0
+        beat_strength = round(max(flux_strength, tempo_strength), 4)
+        if beat_flux and beat_tempo:
+            beat_source = "both"
+        elif beat_flux:
+            beat_source = "flux"
+        elif beat_tempo:
+            beat_source = "tempo"
+        else:
+            beat_source = "none"
 
         dominant_band = max(bands, key=lambda k: bands[k])
         energy_zone_hue = int(centroid * 360)
@@ -247,10 +345,18 @@ class AudioListenerApp:
             "fft":             fft_bins,
             "waveform":        [round(float(v), 3) for v in waveform],
             "beat":            beat,
+            "beat_flux":       beat_flux,
+            "beat_tempo":      beat_tempo,
+            "beat_source":     beat_source,
             "beat_strength":   beat_strength,
+            "tempo_bpm":       round(tempo_bpm, 2),
+            "tempo_confidence": round(tempo_confidence, 4),
             "centroid":        round(centroid, 4),
             "flux":            round(flux, 4),
             "rolloff":         round(rolloff, 4),
+            "bandwidth":       round(float(np.clip(bandwidth, 0.0, 1.0)), 4),
+            "flatness":        round(float(np.clip(flatness, 0.0, 1.0)), 4),
+            "zcr":             round(float(np.clip(zcr, 0.0, 1.0)), 4),
             "dominant_band":   dominant_band,
             "energy_zone_hue": energy_zone_hue,
         }, separators=(",", ":"))
@@ -387,6 +493,13 @@ class AudioListenerApp:
         self._vu_raw = 0.0
         self._prev_fft = None
         self._flux_history = []
+        self._frame_idx = 0
+        self._onset_frames = []
+        self._last_onset_frame = -10_000
+        self._tempo_bpm = 0.0
+        self._tempo_confidence = 0.0
+        self._tempo_period_frames = 0.0
+        self._next_tempo_beat_frame = None
         self._set_status("⏹  Stopped", "#888888")
         self.toggle_btn.config(text="▶  Start", state="normal")
 

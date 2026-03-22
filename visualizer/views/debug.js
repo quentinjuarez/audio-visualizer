@@ -98,6 +98,12 @@ export class DebugView {
     _set("val-db", frame.db.toFixed(1) + " dB");
     _set("val-peak", frame.peak.toFixed(3));
     _set("val-dominant", frame.dominant_band.toUpperCase());
+    _set("val-beat-source", (frame.beat_source ?? "none").toUpperCase());
+
+    const tempoBpm = Number(frame.tempo_bpm ?? 0);
+    const tempoConfidence = Number(frame.tempo_confidence ?? 0);
+    _set("val-tempo", `${tempoBpm.toFixed(1)} BPM`);
+    _set("val-tempo-conf", `${Math.round(tempoConfidence * 100)}%`);
 
     const hue = frame.energy_zone_hue;
     _set("val-hue", hue + "°");
@@ -127,6 +133,10 @@ export class DebugView {
 
     _setBar("centroid", frame.centroid, 1);
     _setBar("rolloff", frame.rolloff, 1);
+    _setBar("bandwidth", frame.bandwidth ?? 0, 1);
+    _setBar("flatness", frame.flatness ?? 0, 1);
+    _setBar("zcr", frame.zcr ?? 0, 1);
+    _setBar("tempo-confidence", frame.tempo_confidence ?? 0, 1);
     _setBar("flux", this._smoothFlux, 2); // flux can exceed 1
     _setBar("beat-strength", frame.beat_strength, 1);
   }

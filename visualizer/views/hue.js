@@ -73,6 +73,7 @@ export class HueView {
       minBri: 30,
       maxBri: 254,
       beatFlash: true,
+      beatSource: "auto", // "auto" | "tempo" | "flux"
       transitionTime: 1, // deciseconds (0 = instant)
       hueDeltaThreshold: 500, // skip send if hue delta < this (0-65535)
       briDeltaThreshold: 4, // skip send if bri delta < this (0-254)
@@ -192,6 +193,13 @@ export class HueView {
     $("hue-beat-flash").checked = this._s.beatFlash;
     $("hue-beat-flash").addEventListener("change", (e) => {
       this._s.beatFlash = e.target.checked;
+      this._save();
+    });
+
+    // Beat source mode
+    $("hue-beat-source").value = this._s.beatSource;
+    $("hue-beat-source").addEventListener("change", (e) => {
+      this._s.beatSource = e.target.value;
       this._save();
     });
 
@@ -468,8 +476,25 @@ export class HueView {
     }
     bri = clamp(bri, this._s.minBri, this._s.maxBri);
 
-    // ── Beat flash override ────────────────────────────────────────
-    if (this._s.beatFlash && frame.beat) {
+    // ── Beat flash override (configurable source) ─────────────────────
+    const beatSourceMode = this._s.beatSource || "auto";
+    let beatForHue = false;
+    if (beatSourceMode === "tempo") {
+      beatForHue =
+        typeof frame.beat_tempo === "boolean" ? frame.beat_tempo : !!frame.beat;
+    } else if (beatSourceMode === "flux") {
+      beatForHue =
+        typeof frame.beat_flux === "boolean" ? frame.beat_flux : !!frame.beat;
+    } else {
+      const hasSplitBeats =
+        typeof frame.beat_tempo === "boolean" ||
+        typeof frame.beat_flux === "boolean";
+      beatForHue = hasSplitBeats
+        ? !!frame.beat_tempo || !!frame.beat_flux
+        : !!frame.beat;
+    }
+
+    if (this._s.beatFlash && beatForHue) {
       bri = 254;
       this._beatActive = true;
       clearTimeout(this._beatTimer);
