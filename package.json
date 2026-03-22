@@ -9,7 +9,8 @@
   ],
   "scripts": {
     "start:server": "yarn workspace server start",
-    "start:listener": "yarn workspace listener start",
+    "start:listener": "python listener/listener.py",
+    "build:listener": "cd listener && python -m PyInstaller --onefile --noconsole listener.py",
     "dev:visualizer": "yarn workspace visualizer dev"
   },
   "packageManager": "yarn@3.5.0"

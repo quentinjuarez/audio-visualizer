@@ -20,6 +20,15 @@ export class AudioEngine {
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0.8;
 
+    // The Web Audio API only processes nodes that are connected (directly or indirectly)
+    // to the destination. Without this chain, getByteFrequencyData always returns zeros.
+    // We use gain=0 so the audio is analyzed but not re-played through the browser speakers
+    // (it's already playing through your Focusrite — no double-playback).
+    const muteNode = this.audioContext.createGain();
+    muteNode.gain.value = 0;
+    this.analyser.connect(muteNode);
+    muteNode.connect(this.audioContext.destination);
+
     const bufferLength = this.analyser.frequencyBinCount;
     this.dataArrayTime = new Uint8Array(bufferLength);
     this.dataArrayFreq = new Uint8Array(bufferLength);
@@ -31,12 +40,14 @@ export class AudioEngine {
   }
 
   connectWebSocket() {
-    console.log('AudioEngine: Connecting to WS...');
-    this.ws = new WebSocket(import.meta.env.VITE_AUDIO_WS_URL);
-    this.ws.binaryType = 'arraybuffer';
+    console.log("AudioEngine: Connecting to WS...");
+    this.ws = new WebSocket(
+      import.meta.env.VITE_AUDIO_WS_URL || "ws://localhost:3000",
+    );
+    this.ws.binaryType = "arraybuffer";
 
     this.ws.onopen = () => {
-      console.log('AudioEngine: WS Connected ✅');
+      console.log("AudioEngine: WS Connected ✅");
     };
 
     this.ws.onmessage = (event) => {
@@ -45,26 +56,26 @@ export class AudioEngine {
     };
 
     this.ws.onclose = () => {
-      console.warn('AudioEngine: WS Disconnected ❌. Retrying in 3s...');
+      console.warn("AudioEngine: WS Disconnected ❌. Retrying in 3s...");
       setTimeout(() => this.connectWebSocket(), 3000); // Retry infini
     };
 
     this.ws.onerror = (err) => {
-      console.error('AudioEngine: WS Error', err);
+      console.error("AudioEngine: WS Error", err);
       this.ws.close(); // Force le close pour déclencher le retry
     };
   }
 
   // Appelée quand l'utilisateur clique (si le navigateur a bloqué le son)
   async resumeContext() {
-    if (this.audioContext && this.audioContext.state === 'suspended') {
+    if (this.audioContext && this.audioContext.state === "suspended") {
       await this.audioContext.resume();
-      console.log('AudioContext: Resumed 🔊');
+      console.log("AudioContext: Resumed 🔊");
     }
   }
 
   processAudioChunk(rawBuffer) {
-    if (this.audioContext.state === 'suspended') return; // On ne traite pas si c'est en pause
+    if (this.audioContext.state === "suspended") return; // On ne traite pas si c'est en pause
 
     const int16View = new Int16Array(rawBuffer);
     const float32View = new Float32Array(int16View.length);
