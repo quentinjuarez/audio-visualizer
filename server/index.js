@@ -1,26 +1,32 @@
-const express = require("express");
+const { createServer } = require("node:http");
 const { WebSocketServer } = require("ws");
-const http = require("http");
-const cors = require("cors");
-require("dotenv").config();
 
-if (process.env.APP_PAUSED === "true") {
-  console.log("🚫 Service paused.");
-  setInterval(() => {}, 1000 * 60 * 60);
-  return;
-}
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+};
 
-const app = express();
-app.use(cors());
-app.get("/", (req, res) => {
-  res.send({ message: "Audio Visualizer WS Server is running!" });
+const server = createServer((req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "application/json");
+
+  if (req.url === "/health") {
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: "ok" }));
+  } else {
+    res.writeHead(200);
+    res.end(
+      JSON.stringify({ message: "Audio Visualizer WS Server is running!" }),
+    );
+  }
 });
 
-app.get("/health", (req, res) => {
-  res.send({ status: "ok" });
-});
-
-const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws) => {

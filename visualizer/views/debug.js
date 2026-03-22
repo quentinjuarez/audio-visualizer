@@ -202,8 +202,9 @@ export class DebugView {
     }
 
     // Pre-compute x positions (bin centres)
-    const xs = Float32Array.from({ length: bins.length }, (_, i) =>
-      ((i + 0.5) / bins.length) * W
+    const xs = Float32Array.from(
+      { length: bins.length },
+      (_, i) => ((i + 0.5) / bins.length) * W,
     );
     const ys = Float32Array.from(
       this._smoothBins,
@@ -212,11 +213,11 @@ export class DebugView {
 
     // Filled gradient area
     const grad = ctx.createLinearGradient(0, 0, W, 0);
-    grad.addColorStop(0,    'hsl(240,90%,50%)');
-    grad.addColorStop(0.2,  'hsl(180,90%,50%)');
-    grad.addColorStop(0.45, 'hsl(120,90%,50%)');
-    grad.addColorStop(0.7,  'hsl(60,90%,50%)');
-    grad.addColorStop(1,    'hsl(0,90%,50%)');
+    grad.addColorStop(0, "hsl(240,90%,50%)");
+    grad.addColorStop(0.2, "hsl(180,90%,50%)");
+    grad.addColorStop(0.45, "hsl(120,90%,50%)");
+    grad.addColorStop(0.7, "hsl(60,90%,50%)");
+    grad.addColorStop(1, "hsl(0,90%,50%)");
 
     ctx.beginPath();
     ctx.moveTo(0, CHART_H);
