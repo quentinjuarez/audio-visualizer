@@ -41,7 +41,7 @@ class AudioListenerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Audio Listener")
-        self.root.geometry("500x370")
+        self.root.geometry("500x450")
         self.root.resizable(False, False)
 
         self.config = self._load_config()
@@ -55,6 +55,7 @@ class AudioListenerApp:
         self._vu_smooth = 0.0   # smoothed value for rendering
         self.device_map: dict[str, int] = {}  # display_name → device index
         self.loopback_set: set[str] = set()  # loopback device labels
+        self._gate_threshold = 0.01  # RMS linear; updated by UI slider
 
         self._setup_ui()
         self._refresh_devices()
@@ -71,11 +72,13 @@ class AudioListenerApp:
                     return json.load(f)
             except Exception:
                 pass
-        return {"ws_url": DEFAULT_WS_URL, "device_name": None}
+        return {"ws_url": DEFAULT_WS_URL, "device_name": None, "url_history": []}
 
     def _save_config(self):
         self.config["ws_url"] = self.url_var.get()
         self.config["device_name"] = self.device_var.get()
+        self.config["gate_db"] = self._gate_db_var.get()
+        self.config["url_history"] = list(self.url_combo["values"])
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
@@ -126,11 +129,14 @@ class AudioListenerApp:
         # in_data is raw Int16LE bytes; reshape to (frames, channels) then mix to mono
         samples = np.frombuffer(in_data, dtype=np.int16).reshape(-1, self._capture_channels)
         mono = samples.mean(axis=1).astype(np.int16)
-        self._vu_raw = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2)))
-        try:
-            self.pcm_queue.put_nowait(mono.tobytes())
-        except queue.Full:
-            pass  # drop frame — never block the real-time thread
+        rms = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2)))
+        self._vu_raw = rms
+        # Noise gate: drop silent frames so the server receives nothing when idle
+        if rms >= self._gate_threshold:
+            try:
+                self.pcm_queue.put_nowait(mono.tobytes())
+            except queue.Full:
+                pass  # drop frame — never block the real-time thread
         return (None, pyaudio.paContinue)
 
     # ── WebSocket send loop (background thread) ───────────────────────────────
@@ -206,6 +212,11 @@ class AudioListenerApp:
                 return
 
             self.is_running = True
+            # Auto-add the URL to history on successful connect
+            self.root.after(0, lambda: self.url_combo.__setitem__(
+                "values",
+                list(dict.fromkeys([url] + list(self.url_combo["values"])))
+            ))
             self._save_config()
 
             # 3. Start send thread
@@ -281,6 +292,14 @@ class AudioListenerApp:
                     int(w * 0.85), 2, int(w * r), h - 2, fill="#ff4444", outline=""
                 )
 
+        # Gate threshold marker
+        gate_normalized = min(1.0, self._gate_threshold * 8)
+        gx = int(w * gate_normalized)
+        self.vu_canvas.create_line(gx, 0, gx, h, fill="#ff8800", width=2)
+        self.vu_canvas.create_text(
+            gx + 3, 2, text="gate", fill="#ff8800", font=("Courier", 7), anchor="nw"
+        )
+
         # Tick lines + labels
         for pct, lbl in ((0.6, "-10 dB"), (0.85, "-3 dB"), (1.0, "0 dB")):
             x = int(w * pct)
@@ -335,10 +354,10 @@ class AudioListenerApp:
 
         def _section(title: str) -> tk.Frame:
             f = tk.Frame(self.root, bg=BG)
-            f.pack(fill=tk.X, padx=20, pady=(10, 0))
-            tk.Label(f, text=title, bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(
-                anchor="w"
-            )
+            f.pack(fill=tk.X, padx=20, pady=(12, 0))
+            tk.Label(
+                f, text=title.upper(), bg=BG, fg="#555555", font=("Segoe UI", 7, "bold")
+            ).pack(anchor="w")
             return f
 
         # Title
@@ -358,20 +377,50 @@ class AudioListenerApp:
         ).pack()
 
         # WebSocket URL
-        f = _section("WebSocket URL")
+        f = _section("WebSocket Server")
+        url_row = tk.Frame(f, bg=BG)
+        url_row.pack(fill=tk.X, pady=(4, 0))
+
+        # Seed history: known URLs first, then any saved ones
+        _known = [
+            "ws://localhost:3000",
+            "wss://audio-visualizer-server.up.railway.app",
+        ]
+        _saved_history: list = self.config.get("url_history", [])
+        _history = list(dict.fromkeys(_known + _saved_history))  # deduplicate, preserve order
+
         self.url_var = tk.StringVar(value=self.config.get("ws_url", DEFAULT_WS_URL))
-        tk.Entry(
-            f,
+        self.url_combo = ttk.Combobox(
+            url_row,
             textvariable=self.url_var,
+            values=_history,
             font=("Segoe UI", 10),
-            bg=ENTRY,
+            state="normal",
+        )
+        self.url_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=5)
+
+        def _add_url():
+            url = self.url_var.get().strip()
+            if not url:
+                return
+            current = list(self.url_combo["values"])
+            if url not in current:
+                current.append(url)
+                self.url_combo["values"] = current
+            self.url_var.set(url)
+
+        tk.Button(
+            url_row,
+            text=" + ",
+            command=_add_url,
+            bg="#333333",
             fg=FG,
-            insertbackground=FG,
             relief="flat",
-            highlightthickness=1,
-            highlightbackground="#444",
-            highlightcolor=ACCENT,
-        ).pack(fill=tk.X, ipady=6, pady=(4, 0))
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            cursor="hand2",
+            bd=0,
+        ).pack(side=tk.LEFT, padx=(8, 0), ipady=5)
 
         # Device selector
         f = _section("Audio Input Device")
@@ -406,33 +455,69 @@ class AudioListenerApp:
         )
         self.vu_canvas.pack(fill=tk.X, pady=(4, 0))
 
+        # Noise gate threshold slider
+        f = _section("Noise Gate")
+        gate_row = tk.Frame(f, bg=BG)
+        gate_row.pack(fill=tk.X, pady=(4, 0))
+        # Slider drives RMS threshold via dB mapping: linear = 10^(dB/20)
+        # Range: -60 dB (0.001) to -10 dB (0.316); default -40 dB (0.01)
+        self._gate_db_var = tk.DoubleVar(value=self.config.get("gate_db", -40.0))
+
+        def _on_gate_change(val):
+            db = float(val)
+            self._gate_threshold = 10 ** (db / 20.0)
+            self._gate_db_label.config(text=f"{db:.0f} dB")
+            self.config["gate_db"] = db
+
+        tk.Scale(
+            gate_row,
+            variable=self._gate_db_var,
+            from_=-60,
+            to=-10,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            command=_on_gate_change,
+            bg=BG,
+            fg=FG,
+            troughcolor="#333333",
+            activebackground="#ff8800",
+            highlightthickness=0,
+            sliderrelief="flat",
+            showvalue=False,
+            bd=0,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._gate_db_label = tk.Label(
+            gate_row, text="-40 dB", bg=BG, fg="#ff8800", font=("Segoe UI", 9), width=7
+        )
+        self._gate_db_label.pack(side=tk.LEFT)
+        # Apply initial value
+        _on_gate_change(self._gate_db_var.get())
+
         # Status
         self.status_label = tk.Label(
             self.root,
             text="⏹  Stopped",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 9),
             bg=BG,
             fg=MUTED,
         )
-        self.status_label.pack(pady=(14, 0))
+        self.status_label.pack(pady=(10, 0))
 
-        # Toggle button
+        # Toggle button — use ipady in pack() for reliable vertical inner padding
         self.toggle_btn = tk.Button(
             self.root,
             text="▶  Start",
             command=self._toggle,
             bg=ACCENT,
             fg="white",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 11, "bold"),
             relief="flat",
             bd=0,
-            padx=24,
-            pady=10,
             activebackground="#005fa3",
             activeforeground="white",
             cursor="hand2",
         )
-        self.toggle_btn.pack(fill=tk.X, padx=20, pady=16)
+        self.toggle_btn.pack(fill=tk.X, padx=20, pady=(10, 16), ipady=11)
 
 
 # ---------------------------------------------------------------------------
