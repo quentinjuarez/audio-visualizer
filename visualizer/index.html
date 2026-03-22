@@ -104,6 +104,334 @@
         flex-shrink: 0;
       }
 
+      /* ── Hue toggle button ─────────────────────────── */
+      #hue-toggle-btn {
+        margin-left: auto;
+        padding: 3px 10px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: var(--fg);
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        cursor: pointer;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      #hue-toggle-btn:hover {
+        border-color: #555;
+        background: #222;
+      }
+      #hue-toggle-btn .hue-icon {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: conic-gradient(
+          hsl(0, 90%, 55%),
+          hsl(60, 90%, 55%),
+          hsl(120, 90%, 55%),
+          hsl(180, 90%, 55%),
+          hsl(240, 90%, 55%),
+          hsl(300, 90%, 55%),
+          hsl(360, 90%, 55%)
+        );
+        flex-shrink: 0;
+      }
+
+      /* ── Hue sidebar panel ─────────────────────────── */
+      #hue-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 320px;
+        height: 100vh;
+        background: #0e0e0e;
+        border-left: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        transform: translateX(100%);
+        transition: transform 0.2s ease;
+        z-index: 100;
+        overflow: hidden;
+      }
+      #hue-panel.open {
+        transform: translateX(0);
+      }
+      .hp-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+        height: 38px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .hp-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--fg);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .hp-title .hue-icon {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: conic-gradient(
+          hsl(0, 90%, 55%),
+          hsl(60, 90%, 55%),
+          hsl(120, 90%, 55%),
+          hsl(180, 90%, 55%),
+          hsl(240, 90%, 55%),
+          hsl(300, 90%, 55%),
+          hsl(360, 90%, 55%)
+        );
+      }
+      #hue-panel-close {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 16px;
+        cursor: pointer;
+        line-height: 1;
+        padding: 4px;
+      }
+      #hue-panel-close:hover {
+        color: var(--fg);
+      }
+
+      .hp-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        scrollbar-width: thin;
+        scrollbar-color: #333 transparent;
+      }
+
+      .hp-section {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .hp-section-title {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 4px;
+      }
+
+      /* Enable row */
+      .hp-enable-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .hp-enable-row label {
+        font-size: 12px;
+        color: var(--fg);
+      }
+      .hp-toggle {
+        position: relative;
+        width: 36px;
+        height: 20px;
+        cursor: pointer;
+      }
+      .hp-toggle input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .hp-toggle .hp-track {
+        position: absolute;
+        inset: 0;
+        background: #2a2a2a;
+        border-radius: 10px;
+        transition: background 0.15s;
+      }
+      .hp-toggle input:checked + .hp-track {
+        background: var(--accent);
+      }
+      .hp-toggle .hp-thumb {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 14px;
+        height: 14px;
+        background: #fff;
+        border-radius: 50%;
+        transition: left 0.15s;
+      }
+      .hp-toggle input:checked ~ .hp-thumb {
+        left: 19px;
+      }
+
+      /* Input row */
+      .hp-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .hp-row label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        flex-shrink: 0;
+        width: 76px;
+      }
+      .hp-row input[type="text"],
+      .hp-row input[type="password"],
+      .hp-row select {
+        flex: 1;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 3px;
+        color: var(--fg);
+        font-family: "Courier New", monospace;
+        font-size: 10px;
+        padding: 3px 6px;
+        min-width: 0;
+      }
+      .hp-row input[type="text"]:focus,
+      .hp-row input[type="password"]:focus,
+      .hp-row select:focus {
+        outline: none;
+        border-color: #444;
+      }
+
+      /* Slider row */
+      .hp-slider-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .hp-slider-row label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        flex-shrink: 0;
+        width: 76px;
+      }
+      .hp-slider-row input[type="range"] {
+        flex: 1;
+        accent-color: var(--accent);
+        min-width: 0;
+      }
+      .hp-slider-row .hp-val {
+        font-size: 10px;
+        color: var(--fg);
+        width: 44px;
+        text-align: right;
+        flex-shrink: 0;
+      }
+
+      /* Buttons */
+      .hp-btn {
+        padding: 4px 10px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 3px;
+        color: var(--fg);
+        font-family: "Courier New", monospace;
+        font-size: 10px;
+        cursor: pointer;
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
+      .hp-btn:hover {
+        border-color: #555;
+        background: #222;
+      }
+      .hp-btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .hp-btn.accent {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .hp-btn.accent:hover {
+        background: rgba(34, 204, 102, 0.1);
+      }
+
+      /* Status */
+      #hue-bridge-status {
+        font-size: 10px;
+        color: var(--muted);
+        font-style: italic;
+        min-height: 14px;
+      }
+
+      /* Light list */
+      #hue-light-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .hue-light-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        padding: 4px 4px;
+        border-radius: 3px;
+        border: 1px solid transparent;
+      }
+      .hue-light-row:hover {
+        border-color: var(--border);
+      }
+      .hue-light-row input[type="checkbox"] {
+        accent-color: var(--accent);
+      }
+      .hue-light-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .hue-light-name {
+        flex: 1;
+        font-size: 11px;
+        color: var(--fg);
+      }
+      .hue-light-type {
+        font-size: 9px;
+        color: var(--muted);
+      }
+
+      /* Static color swatch in the row */
+      #hue-static-hue-swatch {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        border: 1px solid #333;
+        flex-shrink: 0;
+      }
+
+      /* Checkbox row */
+      .hp-check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .hp-check-row input[type="checkbox"] {
+        accent-color: var(--accent);
+      }
+      .hp-check-row label {
+        font-size: 11px;
+        color: var(--fg);
+        cursor: pointer;
+      }
+
       /* ── Main grid ─────────────────────────────────── */
       #main {
         flex: 1;
@@ -258,6 +586,202 @@
         <label>Hue</label>
         <span id="val-hue">—</span>
         <div id="hue-swatch"></div>
+      </div>
+      <button id="hue-toggle-btn">
+        <span class="hue-icon"></span>
+        Hue Lights
+      </button>
+    </div>
+
+    <!-- Hue control sidebar -->
+    <div id="hue-panel">
+      <div class="hp-header">
+        <span class="hp-title">
+          <span class="hue-icon"></span>
+          Philips Hue
+        </span>
+        <button id="hue-panel-close">✕</button>
+      </div>
+      <div class="hp-body">
+        <!-- Enable -->
+        <div class="hp-section">
+          <div class="hp-enable-row">
+            <label for="hue-enabled">Reactive lighting</label>
+            <label class="hp-toggle">
+              <input type="checkbox" id="hue-enabled" />
+              <span class="hp-track"></span>
+              <span class="hp-thumb"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Bridge connection -->
+        <div class="hp-section">
+          <div class="hp-section-title">Bridge</div>
+          <div class="hp-row">
+            <label>IP Address</label>
+            <input type="text" id="hue-bridge-ip" placeholder="192.168.x.x" />
+          </div>
+          <div class="hp-row">
+            <label></label>
+            <button class="hp-btn" id="hue-discover-btn">Auto-discover</button>
+            <button class="hp-btn accent" id="hue-connect-btn">Connect</button>
+          </div>
+          <div class="hp-row">
+            <label>API Key</label>
+            <input
+              type="password"
+              id="hue-api-key"
+              placeholder="(auto-filled after pairing)"
+            />
+          </div>
+          <div class="hp-row">
+            <label></label>
+            <button class="hp-btn accent" id="hue-pair-btn">
+              Pair (press bridge button first)
+            </button>
+          </div>
+          <div id="hue-bridge-status"></div>
+        </div>
+
+        <!-- Lights -->
+        <div class="hp-section">
+          <div
+            class="hp-section-title"
+            style="
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+            "
+          >
+            Lights
+            <button
+              class="hp-btn"
+              id="hue-refresh-btn"
+              style="font-size: 9px; padding: 2px 6px"
+            >
+              ↺ Refresh
+            </button>
+          </div>
+
+          <!-- Group mode selector -->
+          <div class="hp-row">
+            <label>Group</label>
+            <select id="hue-group-select">
+              <option value="">— Individual lights —</option>
+            </select>
+          </div>
+          <div
+            id="hue-req-rate"
+            style="font-size: 9px; color: var(--muted); margin-left: 82px; font-style: italic"
+          ></div>
+
+          <!-- Individual lights (hidden when group selected) -->
+          <div id="hue-lights-individual" style="display:flex;flex-direction:column;gap:4px">
+          <div id="hue-light-list">
+            <span
+              style="font-size: 10px; color: var(--muted); font-style: italic"
+              >Connect to a bridge to list lights</span
+            >
+          </div>
+          </div>
+        </div>
+
+        <!-- Color settings -->
+        <div class="hp-section">
+          <div class="hp-section-title">Color source</div>
+          <div class="hp-row">
+            <label>Mode</label>
+            <select id="hue-color-source">
+              <option value="energy_hue">Energy zone hue</option>
+              <option value="band_color">Dominant band color</option>
+              <option value="static">Static color</option>
+            </select>
+          </div>
+          <div
+            id="hue-static-color-row"
+            style="display: none; flex-direction: column; gap: 6px"
+          >
+            <div class="hp-slider-row">
+              <label>Hue</label>
+              <input
+                type="range"
+                id="hue-static-hue"
+                min="0"
+                max="360"
+                step="1"
+              />
+              <span class="hp-val" id="hue-static-hue-val">0°</span>
+              <span id="hue-static-hue-swatch"></span>
+            </div>
+            <div class="hp-slider-row">
+              <label>Saturation</label>
+              <input
+                type="range"
+                id="hue-static-sat"
+                min="0"
+                max="254"
+                step="1"
+              />
+              <span class="hp-val" id="hue-static-sat-val">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Brightness settings -->
+        <div class="hp-section">
+          <div class="hp-section-title">Brightness source</div>
+          <div class="hp-row">
+            <label>Mode</label>
+            <select id="hue-bri-source">
+              <option value="rms">RMS (loudness)</option>
+              <option value="beat_strength">Beat strength</option>
+              <option value="static">Static</option>
+            </select>
+          </div>
+          <div id="hue-static-bri-row" style="display: none">
+            <div class="hp-slider-row">
+              <label>Brightness</label>
+              <input
+                type="range"
+                id="hue-static-bri"
+                min="1"
+                max="254"
+                step="1"
+              />
+              <span class="hp-val" id="hue-static-bri-val">—</span>
+            </div>
+          </div>
+          <div
+            id="hue-bri-range-row"
+            style="display: flex; flex-direction: column; gap: 6px"
+          >
+            <div class="hp-slider-row">
+              <label>Min bri</label>
+              <input type="range" id="hue-min-bri" min="1" max="254" step="1" />
+              <span class="hp-val" id="hue-min-bri-val">—</span>
+            </div>
+            <div class="hp-slider-row">
+              <label>Max bri</label>
+              <input type="range" id="hue-max-bri" min="1" max="254" step="1" />
+              <span class="hp-val" id="hue-max-bri-val">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Beat & transition -->
+        <div class="hp-section">
+          <div class="hp-section-title">Beat & transition</div>
+          <div class="hp-check-row">
+            <input type="checkbox" id="hue-beat-flash" />
+            <label for="hue-beat-flash">Flash to max brightness on beat</label>
+          </div>
+          <div class="hp-slider-row">
+            <label>Transition</label>
+            <input type="range" id="hue-transition" min="0" max="5" step="1" />
+            <span class="hp-val" id="hue-transition-val">—</span>
+          </div>
+        </div>
       </div>
     </div>
 
