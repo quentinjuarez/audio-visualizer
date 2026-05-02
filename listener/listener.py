@@ -75,6 +75,13 @@ WAVEFORM_POINTS = 256  # time-domain points sent to clients
 FLUX_HISTORY_SIZE = 40 # frames kept for adaptive beat threshold (~1 s @43 fps)
 BEAT_MULTIPLIER       = 1.7  # kick flux must exceed mean*this to register
 BROADBAND_MULTIPLIER  = 1.9  # full-spectrum flux trigger (catches non-kick beats)
+
+# Silence handling — when the noise gate is closed we still emit a zeroed
+# heartbeat frame so the visualiser doesn't sit on the last loud frame.
+# At ~43 fps audio, every 8 callbacks ≈ 5 fps heartbeat — enough to scroll
+# the spectrogram into black without spamming the socket.
+SILENCE_HEARTBEAT_FRAMES = 8
+SILENCE_RESET_FRAMES     = 22  # ~0.5 s silent → reset transient state
 KICK_FREQ_LO = 40.0    # Hz — kick drum detection lower bound
 KICK_FREQ_HI = 90.0    # Hz — kick drum detection upper bound
 HPF_FREQ     = 30.0    # Hz — high-pass cutoff (kill DC / subsonic rumble)
@@ -139,6 +146,8 @@ class AudioListenerApp:
         self.device_map: dict[str, int] = {}  # display_name → device index
         self.loopback_set: set[str] = set()  # loopback device labels
         self._gate_threshold = 0.01  # RMS linear; updated by UI slider
+        self._silence_counter = 0    # consecutive callbacks below the gate
+        self._silence_payload: str | None = None  # cached zeroed JSON frame
 
         # 50 %-overlap ring: previous hop concatenated with the new hop forms
         # one BLOCK_SIZE analysis window. Filled lazily on first callback.
@@ -547,6 +556,39 @@ class AudioListenerApp:
             "gain":            round(gain, 2),
         }, separators=(",", ":"))
 
+    @staticmethod
+    def _build_silence_frame() -> str:
+        """JSON frame emitted while the noise gate is closed. All energy fields
+        are zeroed so the visualiser scrolls into a clean black state instead
+        of holding the last loud reading."""
+        return json.dumps({
+            "rms":             0.0,
+            "db":              -90.0,
+            "peak":            0.0,
+            "bands":           {name: 0.0 for name, _, _ in _BAND_RANGES},
+            "bands_norm":      {name: 0.0 for name, _, _ in _BAND_RANGES},
+            "fft":             [0.0] * FFT_BINS,
+            "waveform":        [0.5] * WAVEFORM_POINTS,
+            "beat":            False,
+            "beat_flux":       False,
+            "beat_tempo":      False,
+            "beat_source":     "none",
+            "beat_strength":   0.0,
+            "tempo_bpm":       0.0,
+            "tempo_confidence": 0.0,
+            "centroid":        0.0,
+            "flux":            0.0,
+            "rolloff":         0.0,
+            "bandwidth":       0.0,
+            "flatness":        0.0,
+            "zcr":             0.0,
+            "dominant_band":   "mid",
+            "energy_zone_hue": 220,
+            "kick_energy":     0.0,
+            "gain":            1.0,
+            "silent":          True,
+        }, separators=(",", ":"))
+
     # ── Audio callback (real-time thread) ────────────────────────────────────
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
@@ -572,12 +614,33 @@ class AudioListenerApp:
 
         rms = float(np.sqrt(np.mean((analysis.astype(np.float32) / 32768.0) ** 2)))
         self._vu_raw = rms
-        # Noise gate: drop silent frames
+        # Noise gate. Above threshold → run analysis. Below → emit a throttled
+        # zeroed heartbeat so the visualiser stops holding the last loud frame.
         if rms >= self._gate_threshold:
+            self._silence_counter = 0
             try:
                 self.frame_queue.put_nowait(self._analyze_frame(analysis))
             except queue.Full:
                 pass  # drop frame — never block the real-time thread
+        else:
+            # After ~0.5 s of silence, drop transient state so the next loud
+            # frame doesn't compute spectral flux against a stale reference.
+            if self._silence_counter == SILENCE_RESET_FRAMES:
+                self._prev_fft = None
+                self._kick_flux_history.clear()
+                self._broad_flux_history.clear()
+                self._kick_env = 0.0
+                self._next_tempo_beat_frame = None
+            # Heartbeat: first frame on transition (counter == 0), then every
+            # SILENCE_HEARTBEAT_FRAMES callbacks.
+            if self._silence_counter % SILENCE_HEARTBEAT_FRAMES == 0:
+                if self._silence_payload is None:
+                    self._silence_payload = self._build_silence_frame()
+                try:
+                    self.frame_queue.put_nowait(self._silence_payload)
+                except queue.Full:
+                    pass
+            self._silence_counter += 1
         return (None, pyaudio.paContinue)
 
     # ── WebSocket send loop (background thread) ───────────────────────────────
@@ -707,6 +770,7 @@ class AudioListenerApp:
         self._have_prev_hop = False
         self._prev_hop = np.zeros(HOP_SIZE, dtype=np.int16)
         self._band_baselines = {name: 0.05 for name, _, _ in _BAND_RANGES}
+        self._silence_counter = 0
         self._set_status("⏹  Stopped", "#888888")
         self.toggle_btn.config(text="▶  Start", state="normal")
 
