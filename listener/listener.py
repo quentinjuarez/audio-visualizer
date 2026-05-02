@@ -38,6 +38,7 @@ import json
 import os
 import queue
 import sys
+from collections import deque
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -61,7 +62,9 @@ BLOCK_SIZE = 2048  # ~46 ms per chunk
 FFT_BINS = 64          # log-spaced bins sent to clients
 WAVEFORM_POINTS = 256  # time-domain points sent to clients
 FLUX_HISTORY_SIZE = 20 # frames kept for adaptive beat threshold
-BEAT_MULTIPLIER = 1.5  # flux must exceed mean*this to register a beat
+BEAT_MULTIPLIER = 1.5  # kick flux must exceed mean*this to register a beat
+KICK_FREQ_LO = 40.0    # Hz — kick drum detection lower bound
+KICK_FREQ_HI = 90.0    # Hz — kick drum detection upper bound
 MIN_TEMPO_BPM = 70.0
 MAX_TEMPO_BPM = 180.0
 
@@ -95,7 +98,8 @@ class AudioListenerApp:
         self.is_running = False
         self.frame_queue: queue.Queue[str] = queue.Queue(maxsize=100)
         self._prev_fft: np.ndarray | None = None
-        self._flux_history: list[float] = []
+        self._kick_flux_history: deque = deque(maxlen=FLUX_HISTORY_SIZE)
+        self._kick_env = 0.0  # smoothed kick-band energy for continuous mapping
         self._frame_idx = 0
         self._onset_frames: list[int] = []
         self._last_onset_frame = -10_000
@@ -119,6 +123,9 @@ class AudioListenerApp:
             (name, (self._fft_freqs >= lo) & (self._fft_freqs < hi))
             for name, lo, hi in _BAND_RANGES
         ]
+        self._kick_mask: np.ndarray = (
+            (self._fft_freqs >= KICK_FREQ_LO) & (self._fft_freqs <= KICK_FREQ_HI)
+        )
 
         self._setup_ui()
         self._refresh_devices()
@@ -262,29 +269,41 @@ class AudioListenerApp:
         rolloff_idx = int(np.searchsorted(cumsum, 0.85 * cumsum[-1]))
         rolloff = float(self._fft_freqs[min(rolloff_idx, len(self._fft_freqs) - 1)]) / nyquist
 
-        # Spectral flux (half-wave rectified diff vs previous frame)
+        # Spectral flux — full-spectrum for Tech display; kick-band for beat detection
         if self._prev_fft is None:
             flux = 0.0
+            kick_flux = 0.0
         else:
-            flux = float(np.sum(np.maximum(magnitude - self._prev_fft, 0.0)))
+            diff = np.maximum(magnitude - self._prev_fft, 0.0)
+            flux      = float(np.sum(diff))
+            kick_flux = float(np.sum(diff[self._kick_mask]))
         self._prev_fft = magnitude.copy()
 
-        # Adaptive beat detection
-        self._flux_history.append(flux)
-        if len(self._flux_history) > FLUX_HISTORY_SIZE:
-            self._flux_history.pop(0)
-        avg_flux = float(np.mean(self._flux_history)) if self._flux_history else 0.0
-        beat_flux = bool(flux > avg_flux * BEAT_MULTIPLIER and flux > 0.005)
+        # Kick-band instantaneous energy (boosted, not clipped) + smoothed envelope
+        kick_raw = float(np.mean(magnitude[self._kick_mask]) * BOOST)
+        self._kick_env += (kick_raw - self._kick_env) * (0.85 if kick_raw > self._kick_env else 0.20)
+        kick_energy = float(np.clip(self._kick_env, 0.0, 1.0))
 
-        # Onset list for tempo lock (ignore unrealistically close onsets)
+        # Adaptive flux threshold from rolling history (deque auto-evicts old entries)
+        self._kick_flux_history.append(kick_flux)
+        avg_kick_flux = float(np.mean(self._kick_flux_history)) if self._kick_flux_history else 0.0
+
+        # Beat detection with refractory period — prevents double-triggers on sustained kicks.
+        # Three conditions: (1) flux ratio spike, (2) absolute energy floor, (3) cooldown elapsed.
         min_interval_frames = max(1, int(frame_rate * (60.0 / MAX_TEMPO_BPM)))
         max_interval_frames = max(min_interval_frames + 1, int(frame_rate * (60.0 / MIN_TEMPO_BPM)))
-        onset = False
-        if beat_flux and (self._frame_idx - self._last_onset_frame) >= min_interval_frames:
-            onset = True
+        kick_candidate = (
+            kick_flux > avg_kick_flux * BEAT_MULTIPLIER
+            and kick_flux > 0.0001
+            and kick_raw > 0.03   # absolute floor — ignore flux spikes in near-silence
+        )
+        beat_flux = False
+        if kick_candidate and (self._frame_idx - self._last_onset_frame) >= min_interval_frames:
+            beat_flux = True
             self._last_onset_frame = self._frame_idx
+            # Collect onsets for tempo estimation
             self._onset_frames.append(self._frame_idx)
-            history_window = int(frame_rate * 12.0)  # keep ~12 seconds of onsets
+            history_window = int(frame_rate * 12.0)
             cutoff = self._frame_idx - history_window
             self._onset_frames = [t for t in self._onset_frames if t >= cutoff]
 
@@ -307,13 +326,15 @@ class AudioListenerApp:
                 self._tempo_confidence = tempo_confidence
                 self._tempo_period_frames = 60.0 * frame_rate / max(tempo_bpm, 1e-6)
 
-                # Re-align phase when a strong onset appears while locked.
-                if onset and tempo_confidence >= 0.35:
+                # Re-align phase on actual kick when tempo is confidently locked
+                if beat_flux and tempo_confidence >= 0.5:
                     self._next_tempo_beat_frame = self._frame_idx + self._tempo_period_frames
 
-        # Tempo-driven beat prediction for steadier beat marks between transients
+        # Tempo-driven beat prediction — requires high confidence AND audible signal.
+        # This fills in beats that flux misses (e.g. muffled kick), but does not
+        # fire during breakdowns or near-silence.
         beat_tempo = False
-        if tempo_confidence >= 0.35 and self._tempo_period_frames > 0.0:
+        if tempo_confidence >= 0.5 and self._tempo_period_frames > 0.0 and rms > 0.02:
             if self._next_tempo_beat_frame is None:
                 self._next_tempo_beat_frame = self._frame_idx + self._tempo_period_frames
             if self._frame_idx >= self._next_tempo_beat_frame - 0.5:
@@ -322,9 +343,11 @@ class AudioListenerApp:
                     self._next_tempo_beat_frame += self._tempo_period_frames
 
         beat = beat_flux or beat_tempo
-        flux_strength = min(1.0, flux / max(avg_flux * 3.0, 1e-6))
-        tempo_strength = tempo_confidence if beat_tempo else 0.0
-        beat_strength = round(max(flux_strength, tempo_strength), 4)
+        flux_strength  = min(1.0, kick_flux / max(avg_kick_flux * 3.0, 1e-6))
+        # Tempo-predicted beats get a moderate fixed strength — they are timing markers,
+        # not measured transients, so do not inflate beat_strength from confidence.
+        tempo_strength = 0.5 if (beat_tempo and not beat_flux) else 0.0
+        beat_strength  = round(max(flux_strength, tempo_strength), 4)
         if beat_flux and beat_tempo:
             beat_source = "both"
         elif beat_flux:
@@ -335,7 +358,18 @@ class AudioListenerApp:
             beat_source = "none"
 
         dominant_band = max(bands, key=lambda k: bands[k])
-        energy_zone_hue = int(centroid * 360)
+
+        # Energy-weighted hue: bass pulls warm (30°), mids pull green-cyan (150°),
+        # treble pulls blue-purple (260°). Covers the full usable Hue gamut and
+        # matches the professional DMX convention: low-freq = warm, high-freq = cool.
+        warm  = bands.get('sub', 0) * 0.3 + bands.get('bass', 0) + bands.get('low_mid', 0) * 0.4
+        mid_e = bands.get('mid', 0)
+        cool  = bands.get('high_mid', 0) * 0.4 + bands.get('high', 0) + bands.get('air', 0) * 0.8
+        total_e = warm + mid_e + cool + 1e-9
+        energy_zone_hue = int(np.clip(
+            (warm * 30.0 + mid_e * 150.0 + cool * 260.0) / total_e,
+            0, 359
+        ))
 
         return json.dumps({
             "rms":             round(rms, 4),
@@ -359,6 +393,7 @@ class AudioListenerApp:
             "zcr":             round(float(np.clip(zcr, 0.0, 1.0)), 4),
             "dominant_band":   dominant_band,
             "energy_zone_hue": energy_zone_hue,
+            "kick_energy":     round(kick_energy, 4),
         }, separators=(",", ":"))
 
     # ── Audio callback (real-time thread) ────────────────────────────────────
@@ -492,7 +527,8 @@ class AudioListenerApp:
             self.ws = None
         self._vu_raw = 0.0
         self._prev_fft = None
-        self._flux_history = []
+        self._kick_flux_history = deque(maxlen=FLUX_HISTORY_SIZE)
+        self._kick_env = 0.0
         self._frame_idx = 0
         self._onset_frames = []
         self._last_onset_frame = -10_000
