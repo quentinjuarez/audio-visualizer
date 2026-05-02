@@ -26,7 +26,7 @@
       body {
         background: var(--bg);
         color: var(--fg);
-        font-family: "Courier New", monospace;
+        font-family: 'Courier New', monospace;
         font-size: 12px;
         overflow: hidden;
         height: 100vh;
@@ -112,7 +112,7 @@
         border: 1px solid #333;
         border-radius: 4px;
         color: var(--fg);
-        font-family: "Courier New", monospace;
+        font-family: 'Courier New', monospace;
         font-size: 11px;
         cursor: pointer;
         letter-spacing: 0.5px;
@@ -288,21 +288,21 @@
         flex-shrink: 0;
         width: 76px;
       }
-      .hp-row input[type="text"],
-      .hp-row input[type="password"],
+      .hp-row input[type='text'],
+      .hp-row input[type='password'],
       .hp-row select {
         flex: 1;
         background: #1a1a1a;
         border: 1px solid #2a2a2a;
         border-radius: 3px;
         color: var(--fg);
-        font-family: "Courier New", monospace;
+        font-family: 'Courier New', monospace;
         font-size: 10px;
         padding: 3px 6px;
         min-width: 0;
       }
-      .hp-row input[type="text"]:focus,
-      .hp-row input[type="password"]:focus,
+      .hp-row input[type='text']:focus,
+      .hp-row input[type='password']:focus,
       .hp-row select:focus {
         outline: none;
         border-color: #444;
@@ -321,7 +321,7 @@
         flex-shrink: 0;
         width: 76px;
       }
-      .hp-slider-row input[type="range"] {
+      .hp-slider-row input[type='range'] {
         flex: 1;
         accent-color: var(--accent);
         min-width: 0;
@@ -341,7 +341,7 @@
         border: 1px solid #333;
         border-radius: 3px;
         color: var(--fg);
-        font-family: "Courier New", monospace;
+        font-family: 'Courier New', monospace;
         font-size: 10px;
         cursor: pointer;
         flex-shrink: 0;
@@ -389,7 +389,7 @@
       .hue-light-row:hover {
         border-color: var(--border);
       }
-      .hue-light-row input[type="checkbox"] {
+      .hue-light-row input[type='checkbox'] {
         accent-color: var(--accent);
       }
       .hue-light-dot {
@@ -423,7 +423,7 @@
         align-items: center;
         gap: 8px;
       }
-      .hp-check-row input[type="checkbox"] {
+      .hp-check-row input[type='checkbox'] {
         accent-color: var(--accent);
       }
       .hp-check-row label {
@@ -808,6 +808,22 @@
           </div>
         </div>
       </div>
+    </div>
+    <div id="ui">
+      <button id="btn-mode">MODE: TIME</button>
+      <a
+        href="/v2/"
+        style="
+          display: inline-block;
+          margin-left: 8px;
+          background: transparent;
+          border: 1px solid #fff;
+          color: #fff;
+          padding: 5px 10px;
+          text-decoration: none;
+        "
+        >v2 →</a
+      >
     </div>
 
     <!-- Main -->
