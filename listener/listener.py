@@ -81,7 +81,6 @@ BROADBAND_MULTIPLIER  = 1.9  # full-spectrum flux trigger (catches non-kick beat
 # At ~43 fps audio, every 8 callbacks ≈ 5 fps heartbeat — enough to scroll
 # the spectrogram into black without spamming the socket.
 SILENCE_HEARTBEAT_FRAMES = 8
-SILENCE_RESET_FRAMES     = 22  # ~0.5 s silent → reset transient state
 KICK_FREQ_LO = 40.0    # Hz — kick drum detection lower bound
 KICK_FREQ_HI = 90.0    # Hz — kick drum detection upper bound
 HPF_FREQ     = 30.0    # Hz — high-pass cutoff (kill DC / subsonic rumble)
@@ -623,16 +622,10 @@ class AudioListenerApp:
             except queue.Full:
                 pass  # drop frame — never block the real-time thread
         else:
-            # After ~0.5 s of silence, drop transient state so the next loud
-            # frame doesn't compute spectral flux against a stale reference.
-            if self._silence_counter == SILENCE_RESET_FRAMES:
-                self._prev_fft = None
-                self._kick_flux_history.clear()
-                self._broad_flux_history.clear()
-                self._kick_env = 0.0
-                self._next_tempo_beat_frame = None
-            # Heartbeat: first frame on transition (counter == 0), then every
-            # SILENCE_HEARTBEAT_FRAMES callbacks.
+            # Below gate. Don't touch _prev_fft / flux histories — the adaptive
+            # beat thresholds depend on a populated rolling window and quiet
+            # passages mid-song dip below the gate all the time. Just emit a
+            # throttled heartbeat so the visualiser knows it's silence.
             if self._silence_counter % SILENCE_HEARTBEAT_FRAMES == 0:
                 if self._silence_payload is None:
                     self._silence_payload = self._build_silence_frame()

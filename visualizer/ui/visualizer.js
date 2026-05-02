@@ -69,6 +69,9 @@ function paletteColor(palette, t) {
 }
 
 const SCROLL_PX_SEC = 64;
+// Minimum continuous silence before the header switches to "NO SIGNAL".
+// Anything shorter is treated as a normal gap in the music.
+const SILENT_GRACE_MS = 2000;
 
 export class Visualizer {
   constructor(canvas, analyzer) {
@@ -92,6 +95,7 @@ export class Visualizer {
     this.beatSize = 0;        // visual scale impulse on the BPM number
 
     this.lastT = performance.now();
+    this._lastSignalT = 0; // wall-clock of last non-silent frame; gates the NO-SIGNAL UI
     this._palette = buildPalette(this.hueSmooth);
 
     this.resize();
@@ -353,10 +357,14 @@ export class Visualizer {
     const a = this.analyzer;
     const ctx = this.ctx;
     const y = this.headerH * 0.5;
-    // Listener emits `silent: true` while its noise gate is closed; we also
-    // fall back to a tiny RMS check so the header still reads "WAITING" if
-    // the listener is from an older build that didn't ship the flag.
-    const silent = a.silent || this.rmsSmooth < 0.003;
+    // Listener emits `silent: true` while its noise gate is closed; fall back
+    // to an RMS check for older builds. Apply a grace window so brief gaps in
+    // the music (notes between hits, quiet passages) don't flicker the UI
+    // into "NO SIGNAL" — only steady silence flips the state.
+    const now = performance.now();
+    const isSilentNow = a.silent || this.rmsSmooth < 0.003;
+    if (!isSilentNow) this._lastSignalT = now;
+    const silent = isSilentNow && (now - this._lastSignalT) > SILENT_GRACE_MS;
     ctx.save();
     ctx.textBaseline = "middle";
 
