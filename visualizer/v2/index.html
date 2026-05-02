@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Visualizer · v2</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+        font-family: monospace;
+        color: #fff;
+      }
+      canvas { display: block; }
+
+      #ui {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+        font-size: 11px;
+      }
+      #ui a, #ui span {
+        background: transparent;
+        border: 1px solid rgba(255,255,255,0.4);
+        color: rgba(255,255,255,0.7);
+        padding: 4px 8px;
+        text-decoration: none;
+      }
+      #ui a:hover { background: #fff; color: #000; }
+      #ui .current {
+        border-color: #fff;
+        color: #fff;
+      }
+
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.85);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 100;
+        cursor: pointer;
+        flex-direction: column;
+      }
+      .blink { animation: blink 1s infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+    </style>
+  </head>
+  <body>
+    <div id="start-overlay">
+      <h1 class="blink">CLICK ANYWHERE TO INITIALIZE SYSTEM</h1>
+    </div>
+
+    <div id="ui">
+      <a href="/">v1</a>
+      <span class="current">v2</span>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
