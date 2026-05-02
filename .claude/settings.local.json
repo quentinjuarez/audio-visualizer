@@ -5,7 +5,10 @@
       "WebFetch(domain:developers.meethue.com)",
       "WebFetch(domain:iotech.blog)",
       "WebFetch(domain:huelog.app)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(rtk ls *)",
+      "Bash(rtk find *)",
+      "Bash(rtk proxy *)"
     ]
   }
 }

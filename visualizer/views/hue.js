@@ -15,6 +15,11 @@ function $(id) {
   return document.getElementById(id);
 }
 
+function _set(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class HueView {
@@ -23,16 +28,28 @@ export class HueView {
     this._lights = {};
     this._groups = {};
     this._selectedLights = new Set(this._s.selectedLights ?? []);
+
+    // Outgoing-state machine
     this._pending = null;
     this._inflight = false;
     this._lastSentHue = -1;
     this._lastSentBri = -1;
-    this._beatEnv = 0;     // 0-1 exponential beat decay envelope
-    this._smoothHue = 180; // low-passed hue angle
+    this._lastSentSat = -1;
+    this._beatEnv = 0;     // 0-1 exponential beat envelope (decays in update())
+    this._smoothHue = 180; // low-passed CSS hue angle
+    this._lastUpdate = null; // for time-based beat decay
     this._flushInterval = null;
+
+    // Live monitor — what's actually being sent + counters
+    this._stats = { total: 0, ok: 0, ratelimit: 0, error: 0 };
+    this._reqLog = []; // {t, outcome} kept ~30 s for sparkline + req/s
+    this._lastPayload = null;
+    this._lastPayloadAt = 0;
+    this._perTargetState = new Map(); // "light/3" or "group/1" → { …state, t }
 
     this._bindUI();
     this._rescheduleFlush();
+    this._monitorTick();
 
     if (this._s.bridgeIp && this._s.apiKey) {
       this._fetchAll();
@@ -52,6 +69,7 @@ export class HueView {
       selectedGroup: "",
       transitionTime: 0, // deciseconds; 0 = instant (best for beat flash)
       minBri: 30,        // minimum brightness between beats (1–254)
+      hueSpread: 60,     // total degrees spread across N selected lights
     };
   }
 
@@ -121,10 +139,17 @@ export class HueView {
       $("hue-transition-val").textContent =
         v === 0 ? "instant" : `${(v / 10).toFixed(1)} s`;
     });
+    this._bindSlider("hue-spread", "hueSpread", (v) => {
+      $("hue-spread-val").textContent = v === 0 ? "off" : `±${Math.round(v / 2)}°`;
+    });
+
+    const resetBtn = $("hue-stats-reset");
+    if (resetBtn) resetBtn.addEventListener("click", () => this.resetStats());
   }
 
   _bindSlider(id, settingKey, display) {
     const el = $(id);
+    if (!el) return;
     el.value = this._s[settingKey];
     display(this._s[settingKey]);
     el.addEventListener("input", (e) => {
@@ -309,6 +334,15 @@ export class HueView {
   // ── Frame processing ───────────────────────────────────────────────────────
 
   update(frame) {
+    // Time-based beat-envelope decay — runs even when disabled so the
+    // monitor swatch decays consistently. Half-life ≈ 180 ms.
+    const now = performance.now();
+    if (this._lastUpdate != null) {
+      const dt = Math.min((now - this._lastUpdate) / 1000, 0.5);
+      this._beatEnv *= Math.pow(0.5, dt / 0.18);
+    }
+    this._lastUpdate = now;
+
     if (!this._s.enabled) return;
     if (!this._s.bridgeIp || !this._s.apiKey) return;
     if (!this._s.selectedGroup && this._selectedLights.size === 0) return;
@@ -316,7 +350,12 @@ export class HueView {
     // Smooth the hue angle so lights don't jitter every frame
     const targetHue = frame.energy_zone_hue ?? this._smoothHue;
     this._smoothHue += (targetHue - this._smoothHue) * 0.12;
-    const bridgeHue = cssToBridgeHue(this._smoothHue);
+
+    // Saturation from spectral flatness — pure tones (single instrument) are
+    // pushed toward fully saturated; noisy/dense spectra get a gentle desat
+    // so the room doesn't blast eye-searing colour during a wash of noise.
+    const flatness = clamp(frame.flatness ?? 0.2, 0, 1);
+    const sat = Math.round(remap(flatness, 0.0, 0.7, 254, 170));
 
     // Ambient brightness follows overall loudness
     const ambientBri = clamp(
@@ -324,15 +363,15 @@ export class HueView {
       this._s.minBri, 200,
     );
 
-    // Beat flux → punch envelope to 1.0; decays exponentially in _flush()
-    if (frame.beat_flux) this._beatEnv = 1.0;
+    // Any beat (kick or broadband) → punch envelope to 1.0; decays above.
+    if (frame.beat) this._beatEnv = Math.max(this._beatEnv, 1.0);
 
     const bri = Math.round(ambientBri + this._beatEnv * (254 - ambientBri));
 
     this._pending = {
       on: true,
-      hue: bridgeHue,
-      sat: 254,
+      hue: cssToBridgeHue(this._smoothHue),
+      sat,
       bri,
       transitiontime: this._beatEnv > 0.05 ? 0 : this._s.transitionTime,
     };
@@ -341,10 +380,11 @@ export class HueView {
   // ── Flush ──────────────────────────────────────────────────────────────────
 
   _flushMs() {
-    // Bridge v2 REST API handles ~20 req/s total.
+    // Bridge v1 REST API: ~10 req/s/light, ~20 req/s/group. We send all
+    // lights in parallel (Promise.allSettled) so a 5-light setup at 50 ms
+    // = 100 reqs/s sustained which is well within the limit.
     if (this._s.selectedGroup) return 50;
-    const n = this._selectedLights.size || 1;
-    return n * 50;
+    return 50;
   }
 
   _rescheduleFlush() {
@@ -359,47 +399,238 @@ export class HueView {
     const state = this._pending;
     this._pending = null;
 
+    // Suppress redundant sends — but always allow during a beat-flash so
+    // the brightness pulse arrives even if hue/bri haven't moved much.
+    const isBeat = this._beatEnv > 0.5;
     const hueDiff = Math.abs(state.hue - this._lastSentHue);
     const briDiff = Math.abs(state.bri - this._lastSentBri);
-    const isBeat = state.bri === 254 && this._beatActive;
+    const satDiff = Math.abs(state.sat - this._lastSentSat);
     if (
       !isBeat &&
       this._lastSentHue !== -1 &&
       hueDiff < 500 &&
-      briDiff < 4
+      briDiff < 4 &&
+      satDiff < 6
     ) {
       return;
     }
     this._lastSentHue = state.hue;
     this._lastSentBri = state.bri;
+    this._lastSentSat = state.sat;
+    this._lastPayload = state;
+    this._lastPayloadAt = performance.now();
 
-    const { bridgeIp: ip, apiKey: key } = this._s;
     this._inflight = true;
-
     if (this._s.selectedGroup) {
-      fetch(`https://${ip}/api/${key}/groups/${this._s.selectedGroup}/action`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(state),
-      })
-        .then((r) => { if (r.status === 429) console.warn("[hue] 429 rate limit"); })
-        .catch(() => {})
-        .finally(() => { this._inflight = false; });
+      const target = `group/${this._s.selectedGroup}`;
+      const url = `https://${this._s.bridgeIp}/api/${this._s.apiKey}/groups/${this._s.selectedGroup}/action`;
+      this._sendRequest(url, state, target).finally(() => {
+        this._inflight = false;
+      });
       return;
     }
 
     const ids = [...this._selectedLights];
-    const sendNext = (i) => {
-      if (i >= ids.length) { this._inflight = false; return; }
-      fetch(`https://${ip}/api/${key}/lights/${ids[i]}/state`, {
+    const promises = ids.map((id, i) => {
+      const lightState = this._stateForLight(state, i, ids.length);
+      const url = `https://${this._s.bridgeIp}/api/${this._s.apiKey}/lights/${id}/state`;
+      return this._sendRequest(url, lightState, `light/${id}`);
+    });
+    Promise.allSettled(promises).finally(() => {
+      this._inflight = false;
+    });
+  }
+
+  // For N selected lights, spread the hue across the configured arc so the
+  // room sweeps colour instead of every bulb flashing identical.
+  _stateForLight(base, i, n) {
+    const spread = this._s.hueSpread ?? 0;
+    if (n <= 1 || spread <= 0) return base;
+    const offset = (i / (n - 1) - 0.5) * spread;
+    const css = ((this._smoothHue + offset) % 360 + 360) % 360;
+    return { ...base, hue: cssToBridgeHue(css) };
+  }
+
+  async _sendRequest(url, body, target) {
+    const t = performance.now();
+    let outcome = "error";
+    try {
+      const r = await fetch(url, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(state),
-      })
-        .then((r) => { if (r.status === 429) console.warn("[hue] 429 rate limit"); })
-        .catch(() => {})
-        .finally(() => sendNext(i + 1));
-    };
-    sendNext(0);
+        body: JSON.stringify(body),
+      });
+      if (r.ok) outcome = "ok";
+      else if (r.status === 429) outcome = "ratelimit";
+      else outcome = "error";
+    } catch {
+      outcome = "error";
+    }
+    this._stats.total++;
+    this._stats[outcome]++;
+    this._reqLog.push({ t, outcome });
+    this._perTargetState.set(target, { ...body, t, outcome });
+    return outcome;
+  }
+
+  resetStats() {
+    this._stats = { total: 0, ok: 0, ratelimit: 0, error: 0 };
+    this._reqLog = [];
+    this._perTargetState.clear();
+    this._lastPayload = null;
+    this._lastPayloadAt = 0;
+  }
+
+  // ── Live monitor render (10 Hz — independent of audio frame rate) ─────────
+
+  _monitorTick() {
+    this._renderMonitor();
+    setTimeout(() => this._monitorTick(), 100);
+  }
+
+  _renderMonitor() {
+    const now = performance.now();
+
+    // Trim req log to last 30 s
+    const cutoff = now - 30_000;
+    while (this._reqLog.length && this._reqLog[0].t < cutoff) this._reqLog.shift();
+
+    // Live target swatch — reflects the most recent sent state
+    if (this._lastPayload) {
+      const cssHue = (this._lastPayload.hue / 65535) * 360;
+      const sat = (this._lastPayload.sat / 254) * 100;
+      const bri = this._lastPayload.bri / 254;
+      const lightness = 25 + bri * 45;
+      const sw = $("hue-monitor-swatch");
+      if (sw) sw.style.background = `hsl(${cssHue}, ${sat}%, ${lightness}%)`;
+
+      _set(
+        "hue-monitor-hue-val",
+        `${Math.round(cssHue)}°  s${this._lastPayload.sat}  b${this._lastPayload.bri}`,
+      );
+
+      const fill = $("hue-monitor-bri");
+      if (fill) fill.style.width = `${(this._lastPayload.bri / 254) * 100}%`;
+
+      const json = $("hue-monitor-json");
+      if (json) {
+        const ageMs = Math.round(now - this._lastPayloadAt);
+        json.textContent = `↑ ${ageMs} ms ago\n${JSON.stringify(this._lastPayload, null, 2)}`;
+      }
+    } else {
+      const sw = $("hue-monitor-swatch");
+      if (sw) sw.style.background = "#1a1a1a";
+      _set("hue-monitor-hue-val", "—");
+      const fill = $("hue-monitor-bri");
+      if (fill) fill.style.width = "0%";
+      const json = $("hue-monitor-json");
+      if (json) json.textContent = "— nothing sent yet —";
+    }
+
+    // Counters
+    _set("hue-stat-total", this._stats.total);
+    _set("hue-stat-ok",    this._stats.ok);
+    _set("hue-stat-429",   this._stats.ratelimit);
+    _set("hue-stat-err",   this._stats.error);
+
+    const inLast1s = this._reqLog.reduce(
+      (n, r) => n + (r.t > now - 1000 ? 1 : 0), 0,
+    );
+    _set("hue-stat-rate", inLast1s);
+
+    this._drawSparkline(now);
+    this._renderPerLightList(now);
+  }
+
+  _drawSparkline(now) {
+    const canvas = $("hue-rate-spark");
+    if (!canvas) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+
+    // 30 buckets of 1 s each — most-recent bucket is rightmost
+    const BUCKETS = 30;
+    const okBins  = new Array(BUCKETS).fill(0);
+    const errBins = new Array(BUCKETS).fill(0);
+    for (const r of this._reqLog) {
+      const ageS = (now - r.t) / 1000;
+      const idx = Math.floor(BUCKETS - 1 - ageS);
+      if (idx < 0 || idx >= BUCKETS) continue;
+      if (r.outcome === "ok") okBins[idx]++;
+      else errBins[idx]++;
+    }
+    const max = Math.max(1, ...okBins.map((v, i) => v + errBins[i]));
+    const bw = W / BUCKETS;
+
+    for (let i = 0; i < BUCKETS; i++) {
+      const okH  = (okBins[i]  / max) * H;
+      const errH = (errBins[i] / max) * H;
+      const x = i * bw;
+      ctx.fillStyle = "rgba(34, 204, 102, 0.65)";
+      ctx.fillRect(x + 1, H - okH, bw - 2, okH);
+      if (errH > 0) {
+        ctx.fillStyle = "rgba(255, 68, 68, 0.7)";
+        ctx.fillRect(x + 1, H - okH - errH, bw - 2, errH);
+      }
+    }
+
+    // Baseline
+    ctx.strokeStyle = "#222";
+    ctx.beginPath();
+    ctx.moveTo(0, H - 0.5);
+    ctx.lineTo(W, H - 0.5);
+    ctx.stroke();
+  }
+
+  _renderPerLightList(now) {
+    const container = $("hue-per-light-list");
+    if (!container) return;
+    const targets = this._s.selectedGroup
+      ? [`group/${this._s.selectedGroup}`]
+      : [...this._selectedLights].map((id) => `light/${id}`);
+
+    // Build/refresh — recreate cheaply since the list is small (≤ 20 lights)
+    container.innerHTML = "";
+    for (const key of targets) {
+      const state = this._perTargetState.get(key);
+      const row = document.createElement("div");
+      row.className = "hue-perlight-row";
+
+      const dot = document.createElement("div");
+      dot.className = "hue-perlight-dot";
+      const label = document.createElement("span");
+      label.className = "hue-perlight-label";
+      const meta = document.createElement("span");
+      meta.className = "hue-perlight-meta";
+
+      label.textContent = key;
+      if (state) {
+        const cssHue = (state.hue / 65535) * 360;
+        const sat = (state.sat / 254) * 100;
+        const briL = 25 + (state.bri / 254) * 45;
+        dot.style.background = `hsl(${cssHue}, ${sat}%, ${briL}%)`;
+        const ageMs = Math.round(now - state.t);
+        const ageStr = ageMs < 1000 ? `${ageMs}ms` : `${(ageMs / 1000).toFixed(1)}s`;
+        const tag =
+          state.outcome === "ok" ? ""
+          : state.outcome === "ratelimit" ? " · 429"
+          : " · err";
+        meta.textContent = `${ageStr}${tag}`;
+        meta.style.color =
+          state.outcome === "ok" ? "var(--muted)"
+          : state.outcome === "ratelimit" ? "#f0a500"
+          : "var(--beat)";
+      } else {
+        dot.style.background = "#1a1a1a";
+        meta.textContent = "—";
+      }
+
+      row.appendChild(dot);
+      row.appendChild(label);
+      row.appendChild(meta);
+      container.appendChild(row);
+    }
   }
 }

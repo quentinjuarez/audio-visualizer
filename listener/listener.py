@@ -2,18 +2,31 @@
 """
 Audio Listener
 Captures any audio device, analyses each block (FFT, bands, beat, spectral
-descriptors) and broadcasts a compact JSON frame over WebSocket at ~22 fps.
+descriptors) and broadcasts a compact JSON frame over WebSocket at ~43 fps.
 
 WASAPI loopback devices (prefixed with "🔊 Loopback:") capture everything
 playing through that output — no virtual cable or VoiceMeeter needed.
 
 Other devices (microphones, virtual cable outputs, etc.) are listed as-is.
 
+Analysis pipeline (per frame)
+-----------------------------
+1. 50 % overlap (HOP = BLOCK / 2) → frame rate doubles, transients land twice
+2. High-pass at 30 Hz to kill DC / subsonic rumble
+3. AGC: rolling peak normalises gain so quiet and loud sources read alike
+4. A-weighting curve applied to a *separate* magnitude copy used for the
+   musical-meaning fields (dominant_band, energy_zone_hue) — raw bands keep
+   their physical levels for the visualiser
+5. Per-band rolling baseline → "dominant" means *unusually* hot for this song,
+   not just "bass is naturally loudest"
+6. Multi-band onset: kick-band (40-90 Hz) OR broadband spectral flux
+
 JSON frame schema
 -----------------
 {
   rms, db, peak,
-  bands: { sub, bass, low_mid, mid, high_mid, high, air },  // 0-1
+  bands: { sub, bass, low_mid, mid, high_mid, high, air },  // 0-1, raw level
+  bands_norm: { … same keys … },                            // 0-1, vs rolling baseline
   fft: float[64],        // log-spaced magnitude bins, 0-1
   waveform: float[256],  // downsampled time-domain, 0-1
   beat: bool,
@@ -21,16 +34,13 @@ JSON frame schema
     beat_tempo: bool,
     beat_source: str,      // none | flux | tempo | both
   beat_strength: float,  // 0-1
-    tempo_bpm: float,      // estimated tempo, 0 when unknown
-    tempo_confidence: float, // 0-1 confidence of BPM lock
-  centroid: float,       // spectral centroid, 0-1
-  flux: float,           // half-wave spectral flux
-  rolloff: float,        // 85% rolloff freq, 0-1
-    bandwidth: float,      // spectral spread, 0-1
-    flatness: float,       // spectral flatness, 0-1
-    zcr: float,            // zero crossing rate, 0-1
-  dominant_band: str,
-  energy_zone_hue: int   // 0-360, for direct Hue lamp mapping
+    tempo_bpm: float,
+    tempo_confidence: float,
+  centroid, flux, rolloff, bandwidth, flatness, zcr: float in 0-1,
+  dominant_band: str,    // perceptually weighted, baseline-normalised
+  energy_zone_hue: int,  // 0-360, weighted-band hue mapping
+  kick_energy: float,    // smoothed kick-band energy, 0-1
+  gain: float            // current AGC gain (debug)
 }
 """
 
@@ -57,16 +67,31 @@ CONFIG_FILE = os.path.join(_BASE, "listener_config.json")
 DEFAULT_WS_URL = "ws://localhost:3000"
 
 SAMPLE_RATE = 44100
-BLOCK_SIZE = 2048  # ~46 ms per chunk
+BLOCK_SIZE = 2048  # ~46 ms FFT window
+HOP_SIZE   = BLOCK_SIZE // 2  # ~23 ms hop → 50 % overlap → ~43 fps
 
 FFT_BINS = 64          # log-spaced bins sent to clients
 WAVEFORM_POINTS = 256  # time-domain points sent to clients
-FLUX_HISTORY_SIZE = 20 # frames kept for adaptive beat threshold
-BEAT_MULTIPLIER = 1.5  # kick flux must exceed mean*this to register a beat
+FLUX_HISTORY_SIZE = 40 # frames kept for adaptive beat threshold (~1 s @43 fps)
+BEAT_MULTIPLIER       = 1.7  # kick flux must exceed mean*this to register
+BROADBAND_MULTIPLIER  = 1.9  # full-spectrum flux trigger (catches non-kick beats)
 KICK_FREQ_LO = 40.0    # Hz — kick drum detection lower bound
 KICK_FREQ_HI = 90.0    # Hz — kick drum detection upper bound
+HPF_FREQ     = 30.0    # Hz — high-pass cutoff (kill DC / subsonic rumble)
 MIN_TEMPO_BPM = 70.0
 MAX_TEMPO_BPM = 180.0
+
+# AGC — adaptive gain so quiet / loud sources both read in 0-1 range
+AGC_TARGET   = 0.85    # target peak FFT magnitude after gain
+AGC_GAIN_MIN = 5.0
+AGC_GAIN_MAX = 80.0
+AGC_ATTACK   = 0.05    # fraction-per-frame approach when gain too high
+AGC_DECAY    = 0.005   # fraction-per-frame approach when signal weakens
+
+# Per-band baseline EMA — slower than AGC, learns the "normal" energy of each
+# band over a song. Used to decide which band is *unusually* hot right now.
+BAND_BASELINE_ALPHA = 0.002  # ~8 s half-life @43 fps
+BAND_BASELINE_FLOOR = 0.005
 
 # Frequency band definitions (Hz)
 _BAND_RANGES = [
@@ -99,7 +124,9 @@ class AudioListenerApp:
         self.frame_queue: queue.Queue[str] = queue.Queue(maxsize=100)
         self._prev_fft: np.ndarray | None = None
         self._kick_flux_history: deque = deque(maxlen=FLUX_HISTORY_SIZE)
+        self._broad_flux_history: deque = deque(maxlen=FLUX_HISTORY_SIZE)
         self._kick_env = 0.0  # smoothed kick-band energy for continuous mapping
+        self._agc_gain = 20.0  # adaptive gain replacing the old fixed BOOST
         self._frame_idx = 0
         self._onset_frames: list[int] = []
         self._last_onset_frame = -10_000
@@ -113,9 +140,24 @@ class AudioListenerApp:
         self.loopback_set: set[str] = set()  # loopback device labels
         self._gate_threshold = 0.01  # RMS linear; updated by UI slider
 
+        # 50 %-overlap ring: previous hop concatenated with the new hop forms
+        # one BLOCK_SIZE analysis window. Filled lazily on first callback.
+        self._prev_hop: np.ndarray = np.zeros(HOP_SIZE, dtype=np.int16)
+        self._have_prev_hop = False
+
         # Precompute FFT helpers (block size is fixed at startup)
-        self._fft_window: np.ndarray = np.hanning(BLOCK_SIZE)
-        self._fft_freqs: np.ndarray = np.fft.rfftfreq(BLOCK_SIZE, d=1.0 / SAMPLE_RATE)
+        self._fft_window: np.ndarray = np.hanning(BLOCK_SIZE).astype(np.float32)
+        self._fft_freqs: np.ndarray = np.fft.rfftfreq(BLOCK_SIZE, d=1.0 / SAMPLE_RATE).astype(np.float32)
+
+        # High-pass curve — smooth ramp from 0 → 1 across HPF_FREQ ± a third
+        self._hpf_curve: np.ndarray = np.clip(
+            (self._fft_freqs - HPF_FREQ * 0.7) / (HPF_FREQ * 0.6), 0.0, 1.0
+        ).astype(np.float32)
+
+        # A-weighting curve (perceptual loudness) — used only for
+        # dominant_band / energy_zone_hue, NOT for the raw band visualiser.
+        self._a_weight: np.ndarray = self._compute_a_weight(self._fft_freqs)
+
         self._log_edges: np.ndarray = np.logspace(
             np.log10(20.0), np.log10(20000.0), FFT_BINS + 1
         )
@@ -126,6 +168,30 @@ class AudioListenerApp:
         self._kick_mask: np.ndarray = (
             (self._fft_freqs >= KICK_FREQ_LO) & (self._fft_freqs <= KICK_FREQ_HI)
         )
+
+        # Precompute log-spaced visualiser bin lookup once. Each FFT_BINS
+        # entry is either a mask of FFT bins inside its log range, or — when
+        # the range is narrower than a single FFT bin (common in bass) — the
+        # index of the nearest FFT bin to use as a fallback.
+        self._log_bin_masks: list[np.ndarray | None] = []
+        self._log_bin_nearest: list[int] = []
+        for i in range(FFT_BINS):
+            lo, hi = self._log_edges[i], self._log_edges[i + 1]
+            mask = (self._fft_freqs >= lo) & (self._fft_freqs < hi)
+            if mask.any():
+                self._log_bin_masks.append(mask)
+                self._log_bin_nearest.append(-1)
+            else:
+                self._log_bin_masks.append(None)
+                self._log_bin_nearest.append(
+                    int(np.argmin(np.abs(self._fft_freqs - (lo + hi) / 2.0)))
+                )
+
+        # Per-band rolling baseline (slow EMA). Initial value is well above the
+        # baseline floor so the first second of audio doesn't normalise to inf.
+        self._band_baselines: dict[str, float] = {
+            name: 0.05 for name, _, _ in _BAND_RANGES
+        }
 
         self._setup_ui()
         self._refresh_devices()
@@ -193,11 +259,32 @@ class AudioListenerApp:
 
     # ── Analysis (called from real-time thread) ─────────────────────────────
 
+    @staticmethod
+    def _compute_a_weight(freqs: np.ndarray) -> np.ndarray:
+        """A-weighting curve (IEC 61672-1) in linear amplitude domain.
+        Normalised so the response at 1 kHz equals 1.0."""
+        f2 = freqs.astype(np.float64) ** 2
+        num = (12194.0 ** 2) * (f2 ** 2)
+        den = (
+            (f2 + 20.6 ** 2)
+            * np.sqrt(np.maximum((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2), 1e-20))
+            * (f2 + 12194.0 ** 2)
+        )
+        ra = num / np.maximum(den, 1e-20)
+        # Reference at 1 kHz
+        f0 = 1000.0 ** 2
+        ra_ref = ((12194.0 ** 2) * (f0 ** 2)) / (
+            (f0 + 20.6 ** 2)
+            * np.sqrt((f0 + 107.7 ** 2) * (f0 + 737.9 ** 2))
+            * (f0 + 12194.0 ** 2)
+        )
+        return (ra / ra_ref).astype(np.float32)
+
     def _analyze_frame(self, mono: np.ndarray) -> str:
         """Full spectral analysis of one Int16 mono block. Returns JSON string."""
         f = mono.astype(np.float32) / 32768.0  # → [-1, 1]
         self._frame_idx += 1
-        frame_rate = SAMPLE_RATE / BLOCK_SIZE
+        frame_rate = SAMPLE_RATE / HOP_SIZE  # ~43 fps with 50 % overlap
 
         # Time domain
         rms  = float(np.sqrt(np.mean(f ** 2)))
@@ -209,30 +296,52 @@ class AudioListenerApp:
         step = max(1, len(f) // WAVEFORM_POINTS)
         waveform = np.clip((f[::step][:WAVEFORM_POINTS] + 1.0) / 2.0, 0.0, 1.0)
 
-        # FFT magnitude (peak-normalised)
+        # FFT magnitude (peak-normalised), then high-pass to kill DC / rumble.
         magnitude = np.abs(np.fft.rfft(f * self._fft_window)) / (BLOCK_SIZE / 2)
-        BOOST = 20.0  # empirical scale for typical music levels
+        magnitude *= self._hpf_curve
 
-        # Band energies
+        # Adaptive gain — replaces the old fixed BOOST=20. Tracks rolling peak
+        # so quiet tracks and loud tracks both fill the 0-1 range. Slow attack
+        # prevents transients from clamping the gain; faster decay lets us
+        # come back up after a loud hit.
+        peak_mag = float(np.max(magnitude))
+        if peak_mag > 1e-6:
+            desired = AGC_TARGET / peak_mag
+            coef = AGC_ATTACK if desired < self._agc_gain else AGC_DECAY
+            self._agc_gain += (desired - self._agc_gain) * coef
+            self._agc_gain = float(np.clip(self._agc_gain, AGC_GAIN_MIN, AGC_GAIN_MAX))
+        gain = self._agc_gain
+
+        # Magnitude scaled for visualiser-style 0-1 levels
+        mag_scaled = magnitude * gain
+        # Perceptually weighted copy used for musical-meaning fields (dominant,
+        # energy_zone_hue). Keeps raw bands honest for the visualiser.
+        mag_perceptual = mag_scaled * self._a_weight
+
+        # Band energies (raw — what the visualiser shows)
         bands: dict[str, float] = {}
         for name, mask in self._band_masks:
             bands[name] = (
-                round(float(np.clip(np.mean(magnitude[mask]) * BOOST, 0.0, 1.0)), 4)
+                round(float(np.clip(np.mean(mag_scaled[mask]), 0.0, 1.0)), 4)
                 if mask.any() else 0.0
             )
 
-        # 64 log-spaced visualiser bins
+        # Perceptual band energies (A-weighted) — used internally for hue/dominance
+        bands_perceptual: dict[str, float] = {}
+        for name, mask in self._band_masks:
+            bands_perceptual[name] = (
+                float(np.clip(np.mean(mag_perceptual[mask]), 0.0, 1.0))
+                if mask.any() else 0.0
+            )
+
+        # 64 log-spaced visualiser bins (precomputed masks → no per-frame allocs)
         fft_bins: list[float] = []
         for i in range(FFT_BINS):
-            lo, hi = self._log_edges[i], self._log_edges[i + 1]
-            mask = (self._fft_freqs >= lo) & (self._fft_freqs < hi)
-            if mask.any():
-                val = float(np.clip(np.mean(magnitude[mask]) * BOOST, 0.0, 1.0))
+            mask = self._log_bin_masks[i]
+            if mask is not None:
+                val = float(np.clip(np.mean(mag_scaled[mask]), 0.0, 1.0))
             else:
-                # No FFT sample falls in this narrow log range (common in bass);
-                # fall back to the single nearest frequency bin.
-                nearest = int(np.argmin(np.abs(self._fft_freqs - (lo + hi) / 2.0)))
-                val = float(np.clip(magnitude[nearest] * BOOST, 0.0, 1.0))
+                val = float(np.clip(mag_scaled[self._log_bin_nearest[i]], 0.0, 1.0))
             fft_bins.append(round(val, 3))
 
         # Spectral centroid (0-1)
@@ -269,36 +378,51 @@ class AudioListenerApp:
         rolloff_idx = int(np.searchsorted(cumsum, 0.85 * cumsum[-1]))
         rolloff = float(self._fft_freqs[min(rolloff_idx, len(self._fft_freqs) - 1)]) / nyquist
 
-        # Spectral flux — full-spectrum for Tech display; kick-band for beat detection
+        # Spectral flux — full-spectrum for Tech display; kick-band for beat
+        # detection. Computed on the AGC-scaled magnitude so absolute floors
+        # below stay meaningful across volume levels.
         if self._prev_fft is None:
             flux = 0.0
             kick_flux = 0.0
         else:
-            diff = np.maximum(magnitude - self._prev_fft, 0.0)
+            diff = np.maximum(mag_scaled - self._prev_fft, 0.0)
             flux      = float(np.sum(diff))
             kick_flux = float(np.sum(diff[self._kick_mask]))
-        self._prev_fft = magnitude.copy()
+        self._prev_fft = mag_scaled.copy()
 
-        # Kick-band instantaneous energy (boosted, not clipped) + smoothed envelope
-        kick_raw = float(np.mean(magnitude[self._kick_mask]) * BOOST)
+        # Kick-band instantaneous energy (already 0-1 from mag_scaled)
+        kick_raw = float(np.mean(mag_scaled[self._kick_mask]))
         self._kick_env += (kick_raw - self._kick_env) * (0.85 if kick_raw > self._kick_env else 0.20)
         kick_energy = float(np.clip(self._kick_env, 0.0, 1.0))
 
-        # Adaptive flux threshold from rolling history (deque auto-evicts old entries)
+        # Adaptive flux thresholds from rolling history (~1 s @43 fps)
         self._kick_flux_history.append(kick_flux)
-        avg_kick_flux = float(np.mean(self._kick_flux_history)) if self._kick_flux_history else 0.0
+        self._broad_flux_history.append(flux)
+        avg_kick_flux  = float(np.mean(self._kick_flux_history))  if self._kick_flux_history  else 0.0
+        avg_broad_flux = float(np.mean(self._broad_flux_history)) if self._broad_flux_history else 0.0
 
-        # Beat detection with refractory period — prevents double-triggers on sustained kicks.
-        # Three conditions: (1) flux ratio spike, (2) absolute energy floor, (3) cooldown elapsed.
+        # Beat detection with refractory period.
+        # Two onset paths OR'd together so that:
+        #   - kick_candidate fires on tracks with strong low-end transients
+        #   - broad_candidate catches snares/claps/synth hits on tracks
+        #     where the kick is weak or absent (acoustic, jazz, vocal-heavy)
         min_interval_frames = max(1, int(frame_rate * (60.0 / MAX_TEMPO_BPM)))
         max_interval_frames = max(min_interval_frames + 1, int(frame_rate * (60.0 / MIN_TEMPO_BPM)))
         kick_candidate = (
             kick_flux > avg_kick_flux * BEAT_MULTIPLIER
-            and kick_flux > 0.0001
-            and kick_raw > 0.03   # absolute floor — ignore flux spikes in near-silence
+            and avg_kick_flux > 1e-5
+            and kick_raw > 0.04
+            and rms > 0.01
+        )
+        broad_candidate = (
+            flux > avg_broad_flux * BROADBAND_MULTIPLIER
+            and avg_broad_flux > 1e-4
+            and rms > 0.015
         )
         beat_flux = False
-        if kick_candidate and (self._frame_idx - self._last_onset_frame) >= min_interval_frames:
+        if (kick_candidate or broad_candidate) and (
+            self._frame_idx - self._last_onset_frame
+        ) >= min_interval_frames:
             beat_flux = True
             self._last_onset_frame = self._frame_idx
             # Collect onsets for tempo estimation
@@ -357,14 +481,39 @@ class AudioListenerApp:
         else:
             beat_source = "none"
 
-        dominant_band = max(bands, key=lambda k: bands[k])
+        # ── Per-band rolling baseline + normalised bands ──────────────────
+        # Slow EMA — only updated when we're actually hearing music. This
+        # learns the typical energy of each band over the song; "dominant"
+        # then means *unusually* hot for *this* track instead of the
+        # always-true "bass is naturally loudest in music".
+        if rms > 0.01:
+            for name, val in bands_perceptual.items():
+                self._band_baselines[name] = (
+                    self._band_baselines[name] * (1.0 - BAND_BASELINE_ALPHA)
+                    + val * BAND_BASELINE_ALPHA
+                )
 
-        # Energy-weighted hue: bass pulls warm (30°), mids pull green-cyan (150°),
-        # treble pulls blue-purple (260°). Covers the full usable Hue gamut and
-        # matches the professional DMX convention: low-freq = warm, high-freq = cool.
-        warm  = bands.get('sub', 0) * 0.3 + bands.get('bass', 0) + bands.get('low_mid', 0) * 0.4
-        mid_e = bands.get('mid', 0)
-        cool  = bands.get('high_mid', 0) * 0.4 + bands.get('high', 0) + bands.get('air', 0) * 0.8
+        # bands_norm: 0.5 = at-baseline, 1.0 = ≥2× baseline, 0.0 = silent.
+        bands_norm: dict[str, float] = {}
+        for name, val in bands_perceptual.items():
+            base = max(self._band_baselines[name], BAND_BASELINE_FLOOR)
+            ratio = val / base
+            bands_norm[name] = round(float(np.clip(0.5 * min(ratio, 4.0), 0.0, 1.0)), 4)
+
+        # dominant_band uses the same ratio (no clipping) so the "winner" is
+        # still picked even when several bands are saturated.
+        ratios = {
+            n: bands_perceptual[n] / max(self._band_baselines[n], BAND_BASELINE_FLOOR)
+            for n in bands_perceptual
+        }
+        dominant_band = max(ratios, key=ratios.get)
+
+        # Energy-weighted hue from the perceptual (A-weighted) bands so the
+        # cool end isn't artificially suppressed by the natural 1/f spectrum.
+        bw = bands_perceptual
+        warm  = bw.get('sub', 0) * 0.3 + bw.get('bass', 0) + bw.get('low_mid', 0) * 0.4
+        mid_e = bw.get('mid', 0)
+        cool  = bw.get('high_mid', 0) * 0.4 + bw.get('high', 0) + bw.get('air', 0) * 0.8
         total_e = warm + mid_e + cool + 1e-9
         energy_zone_hue = int(np.clip(
             (warm * 30.0 + mid_e * 150.0 + cool * 260.0) / total_e,
@@ -376,6 +525,7 @@ class AudioListenerApp:
             "db":              db,
             "peak":            round(peak, 4),
             "bands":           bands,
+            "bands_norm":      bands_norm,
             "fft":             fft_bins,
             "waveform":        [round(float(v), 3) for v in waveform],
             "beat":            beat,
@@ -394,6 +544,7 @@ class AudioListenerApp:
             "dominant_band":   dominant_band,
             "energy_zone_hue": energy_zone_hue,
             "kick_energy":     round(kick_energy, 4),
+            "gain":            round(gain, 2),
         }, separators=(",", ":"))
 
     # ── Audio callback (real-time thread) ────────────────────────────────────
@@ -403,13 +554,28 @@ class AudioListenerApp:
             return (None, pyaudio.paContinue)
         # Reshape to (frames, channels) then mix to mono
         samples = np.frombuffer(in_data, dtype=np.int16).reshape(-1, self._capture_channels)
-        mono = samples.mean(axis=1).astype(np.int16)
-        rms = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2)))
+        new_hop = samples.mean(axis=1).astype(np.int16)  # HOP_SIZE samples
+
+        # 50 % overlap — each analysis frame is the previous hop concatenated
+        # with the new one, giving a BLOCK_SIZE window every HOP_SIZE samples.
+        if not self._have_prev_hop:
+            self._prev_hop = new_hop.copy()
+            self._have_prev_hop = True
+            # First callback only fills the buffer; nothing to analyse yet.
+            self._vu_raw = float(np.sqrt(np.mean(
+                (new_hop.astype(np.float32) / 32768.0) ** 2
+            )))
+            return (None, pyaudio.paContinue)
+
+        analysis = np.concatenate((self._prev_hop, new_hop))
+        self._prev_hop = new_hop  # rotate
+
+        rms = float(np.sqrt(np.mean((analysis.astype(np.float32) / 32768.0) ** 2)))
         self._vu_raw = rms
         # Noise gate: drop silent frames
         if rms >= self._gate_threshold:
             try:
-                self.frame_queue.put_nowait(self._analyze_frame(mono))
+                self.frame_queue.put_nowait(self._analyze_frame(analysis))
             except queue.Full:
                 pass  # drop frame — never block the real-time thread
         return (None, pyaudio.paContinue)
@@ -470,7 +636,7 @@ class AudioListenerApp:
                     format=pyaudio.paInt16,
                     channels=self._capture_channels,
                     rate=SAMPLE_RATE,
-                    frames_per_buffer=BLOCK_SIZE,
+                    frames_per_buffer=HOP_SIZE,
                     input=True,
                     input_device_index=device_idx,
                     stream_callback=self._audio_callback,
@@ -528,7 +694,9 @@ class AudioListenerApp:
         self._vu_raw = 0.0
         self._prev_fft = None
         self._kick_flux_history = deque(maxlen=FLUX_HISTORY_SIZE)
+        self._broad_flux_history = deque(maxlen=FLUX_HISTORY_SIZE)
         self._kick_env = 0.0
+        self._agc_gain = 20.0
         self._frame_idx = 0
         self._onset_frames = []
         self._last_onset_frame = -10_000
@@ -536,6 +704,9 @@ class AudioListenerApp:
         self._tempo_confidence = 0.0
         self._tempo_period_frames = 0.0
         self._next_tempo_beat_frame = None
+        self._have_prev_hop = False
+        self._prev_hop = np.zeros(HOP_SIZE, dtype=np.int16)
+        self._band_baselines = {name: 0.05 for name, _, _ in _BAND_RANGES}
         self._set_status("⏹  Stopped", "#888888")
         self.toggle_btn.config(text="▶  Start", state="normal")
 

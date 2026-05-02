@@ -398,6 +398,127 @@
       .hp-check-row { display: flex; align-items: center; gap: 8px; }
       .hp-check-row input[type='checkbox'] { accent-color: var(--accent); }
       .hp-check-row label { font-size: 11px; color: var(--fg); cursor: pointer; }
+
+      /* ── Hue monitor (live what's-being-sent panel) ──────────────────── */
+      .hue-monitor-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .hue-monitor-cell { display: flex; flex-direction: column; gap: 4px; }
+      .hue-monitor-label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+      }
+      #hue-monitor-swatch {
+        height: 38px;
+        border-radius: 4px;
+        border: 1px solid #2a2a2a;
+        background: #1a1a1a;
+        transition: background 0.05s linear;
+      }
+      .hue-monitor-val { font-size: 10px; color: var(--fg); font-family: monospace; }
+
+      .hue-monitor-bri-wrap {
+        height: 38px;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        overflow: hidden;
+        position: relative;
+      }
+      #hue-monitor-bri {
+        height: 100%;
+        background: linear-gradient(90deg, #444, #f5d342, #fff);
+        width: 0%;
+        transition: width 0.05s linear;
+      }
+
+      .hue-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 4px;
+      }
+      .hue-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background: #141414;
+        border: 1px solid #222;
+        border-radius: 3px;
+        padding: 4px 2px;
+        min-width: 0;
+      }
+      .hue-stat-label {
+        font-size: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+        margin-bottom: 2px;
+      }
+      .hue-stat span:not(.hue-stat-label) {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--fg);
+        font-family: monospace;
+      }
+      .hue-stat.warn span:not(.hue-stat-label) { color: #f0a500; }
+      .hue-stat.err  span:not(.hue-stat-label) { color: var(--beat); }
+
+      #hue-rate-spark {
+        width: 100%;
+        height: 36px;
+        background: #0d0d0d;
+        border: 1px solid #1e1e1e;
+        border-radius: 3px;
+        display: block;
+      }
+
+      .hue-monitor-payload {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      #hue-monitor-json {
+        background: #0d0d0d;
+        border: 1px solid #1e1e1e;
+        border-radius: 3px;
+        padding: 6px 8px;
+        font-family: monospace;
+        font-size: 10px;
+        line-height: 1.4;
+        color: #aaa;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 110px;
+        overflow-y: auto;
+        margin: 0;
+      }
+
+      #hue-per-light-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .hue-perlight-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 4px;
+        border-radius: 3px;
+        background: #141414;
+      }
+      .hue-perlight-dot {
+        width: 10px; height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        background: #1a1a1a;
+        transition: background 0.05s linear;
+      }
+      .hue-perlight-label { flex: 1; font-size: 10px; color: var(--fg); font-family: monospace; }
+      .hue-perlight-meta  { font-size: 10px; color: var(--muted); font-family: monospace; }
     </style>
   </head>
   <body>
@@ -612,7 +733,53 @@
                 <input type="range" id="hue-transition" min="0" max="5" step="1" />
                 <span class="hp-val" id="hue-transition-val">—</span>
               </div>
-              <p class="hp-hint">Colors follow the music. Lights flash full brightness on every kick.</p>
+              <div class="hp-slider-row">
+                <label>Hue spread</label>
+                <input type="range" id="hue-spread" min="0" max="180" step="10" />
+                <span class="hp-val" id="hue-spread-val">—</span>
+              </div>
+              <p class="hp-hint">Colors follow the music. Lights flash on every kick. Spread distributes hue across selected lights.</p>
+            </div>
+
+            <!-- Live monitor -->
+            <div class="hp-section">
+              <div class="hp-section-title" style="display:flex;justify-content:space-between;align-items:center">
+                Live monitor
+                <button class="hp-btn" id="hue-stats-reset">↺ Reset</button>
+              </div>
+
+              <div class="hue-monitor-grid">
+                <div class="hue-monitor-cell">
+                  <div class="hue-monitor-label">Color sent</div>
+                  <div id="hue-monitor-swatch"></div>
+                  <div class="hue-monitor-val" id="hue-monitor-hue-val">—</div>
+                </div>
+                <div class="hue-monitor-cell">
+                  <div class="hue-monitor-label">Brightness</div>
+                  <div class="hue-monitor-bri-wrap"><div id="hue-monitor-bri"></div></div>
+                  <div class="hue-monitor-val">0–254</div>
+                </div>
+              </div>
+
+              <div class="hue-stats-grid">
+                <div class="hue-stat"><span class="hue-stat-label">Sent</span><span id="hue-stat-total">0</span></div>
+                <div class="hue-stat"><span class="hue-stat-label">OK</span><span id="hue-stat-ok">0</span></div>
+                <div class="hue-stat warn"><span class="hue-stat-label">429</span><span id="hue-stat-429">0</span></div>
+                <div class="hue-stat err"><span class="hue-stat-label">Err</span><span id="hue-stat-err">0</span></div>
+                <div class="hue-stat"><span class="hue-stat-label">Req/s</span><span id="hue-stat-rate">0</span></div>
+              </div>
+
+              <canvas id="hue-rate-spark" width="280" height="36"></canvas>
+
+              <div class="hue-monitor-payload">
+                <div class="hue-monitor-label">Last payload</div>
+                <pre id="hue-monitor-json">— nothing sent yet —</pre>
+              </div>
+
+              <div class="hue-monitor-payload">
+                <div class="hue-monitor-label">Per-target state</div>
+                <div id="hue-per-light-list"></div>
+              </div>
             </div>
 
           </div><!-- .hp-body -->
